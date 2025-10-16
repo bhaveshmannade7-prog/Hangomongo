@@ -18,7 +18,7 @@ from aiogram.enums import ParseMode
 from sqlalchemy import create_engine, Column, Integer, String, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from algoliasearch.search_client import SearchClient # Used SearchClient and Init_Index
+from algoliasearch.search_client import SearchClient 
 from rapidfuzz import fuzz 
 
 # ====================================================================
@@ -39,7 +39,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 ALGOLIA_APP_ID = os.getenv("ALGOLIA_APPLICATION_ID")
 ALGOLIA_SEARCH_KEY = os.getenv("ALGOLIA_SEARCH_KEY") 
-# FIX: Write key is essential for indexing and must be retrieved from environment
 ALGOLIA_WRITE_KEY = os.getenv("ALGOLIA_WRITE_KEY") 
 ALGOLIA_INDEX_NAME = os.getenv("ALGOLIA_INDEX_NAME", "Media_index")
 
@@ -127,13 +126,20 @@ def initialize_db_and_algolia_with_retry(max_retries: int = 5, base_delay: float
                 test_session.close()
                 raise Exception(f"DB health check failed: {e}")
             
-            # FIX: Client initialized with Write Key for indexing permission (v3 syntax)
-            algolia_client = SearchClient.create(ALGOLIA_APP_ID, ALGOLIA_WRITE_KEY) 
+            # FIX: Client initialized with Write Key for indexing permission
+            algolia_client = SearchClient(ALGOLIA_APP_ID, ALGOLIA_WRITE_KEY) 
             
             algolia_index = algolia_client.init_index(ALGOLIA_INDEX_NAME) 
             
             try:
-                algolia_index.search("test", {"hitsPerPage": 1})
+                # Test connection using Search Key (passed in the request_options for read operations)
+                algolia_index.search(
+                    query="test",
+                    request_options={
+                        "hitsPerPage": 1, 
+                        "apiKey": ALGOLIA_SEARCH_KEY # Use search key for read test
+                    }
+                )
                 logger.info("✅ Algolia connection verified.")
             except Exception as e:
                 logger.warning(f"⚠️ Algolia health check warning: {e}")
@@ -188,13 +194,6 @@ def add_user(user_id: int, username: Optional[str] = None, first_name: Optional[
     if user_id not in users_database:
         users_database[user_id] = {"user_id": user_id}
 
-def escape_markdown_v2(text: str) -> str:
-    """Escape special characters for MarkdownV2."""
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
-
 # ====================================================================
 # SYNCHRONOUS Algolia/DB Operations (FIXED with asyncio.to_thread)
 # ====================================================================
@@ -208,18 +207,16 @@ def sync_algolia_fuzzy_search(query: str, limit: int = 20) -> List[Dict]:
     bot_stats["total_searches"] += 1
     
     try:
-        search_results = algolia_index.search(query, {
-            "attributesToRetrieve": ['title', 'post_id'],
-            "hitsPerPage": limit,
-            "typoTolerance": True,
-            "minWordSizefor1Typo": 3,
-            "minWordSizefor2Typos": 6,
-            "allowTyposOnNumericTokens": False,
-            "ignorePlurals": True,
-            "removeStopWords": True,
-            "advancedSyntax": False,
-            "optionalWords": query.split()
-        })
+        # Fuzzy Search: Use Search Key for read operations
+        search_results = algolia_index.search(
+            query=query,
+            request_options={
+                "attributesToRetrieve": ['title', 'post_id'],
+                "hitsPerPage": limit,
+                "typoTolerance": True,
+                "apiKey": ALGOLIA_SEARCH_KEY # Explicitly use Search Key
+            }
+        )
         bot_stats["algolia_searches"] += 1
         
         results = []
@@ -255,8 +252,7 @@ def sync_add_movie_to_db_and_algolia(title: str, post_id: int):
         db_session.commit()
         db_session.refresh(new_movie)
 
-        # 3. Add to Algolia (FIXED: Removed 'body=' keyword to fix TypeError)
-        # FIX: Now using save_object on the correct index object
+        # 3. Add to Algolia (FIXED: Auto-Indexing Bug)
         algolia_index.save_object(
             { # object is passed directly
                 "objectID": str(new_movie.id),
@@ -277,8 +273,8 @@ def sync_add_movie_to_db_and_algolia(title: str, post_id: int):
         db_session.close()
 
 # ASYNCHRONOUS wrappers for the main bot
-async def algolia_fuzzy_search(query: str, limit: int = 20):
-    return await asyncio.to_thread(sync_algolia_fuzzy_search, query, limit)
+def algolia_fuzzy_search(query: str, limit: int = 20):
+    return asyncio.to_thread(sync_algolia_fuzzy_search, query, limit)
 
 async def add_movie_to_db_and_algolia(title: str, post_id: int):
     return await asyncio.to_thread(sync_add_movie_to_db_and_algolia, title, post_id)
@@ -303,13 +299,14 @@ async def cmd_start(message: Message):
         hours = uptime_seconds // 3600
         minutes = (uptime_seconds % 3600) // 60
         
+        # FIX: Professional English and correct MarkdownV2 escaping
         admin_welcome_text = (
             f"👑 *Admin Dashboard \\- Status Report*\n"
             f"────────────────────────\n"
             f"🟢 *Status:* Operational\n"
-            f"⏱ *Uptime:* {escape_markdown_v2(str(hours))}h {escape_markdown_v2(str(minutes))}m\n"
-            f"👥 *Active Users:* {escape_markdown_v2(str(len(users_database)))}\n"
-            f"🔍 *Total Searches:* {escape_markdown_v2(str(bot_stats['total_searches']))}\n"
+            f"⏱ *Uptime:* {hours}h {minutes}m\n"
+            f"👥 *Active Users:* {len(users_database)}\n"
+            f"🔍 *Total Searches:* {bot_stats['total_searches']}\n"
             f"────────────────────────\n"
             f"*Quick Commands:*\n"
             f"• /total\\_movies \\(DB Index Count\\)\n"
@@ -390,7 +387,6 @@ async def handle_search(message: Message):
         results = await algolia_fuzzy_search(query, limit=20) 
         
         if not results:
-            # FIX: Added ParseMode for error message
             await message.answer(f"❌ Koi Movie Nahin Mili: **{query}**", parse_mode=ParseMode.MARKDOWN_V2)
             logger.info(f"❌ No results found for: '{query}'")
             return
@@ -493,7 +489,7 @@ async def cmd_cleanup_users(message: Message):
     
     old_count = len(users_database)
     users_database.clear()
-    await message.answer(f"🧹 Cleaned up in\\-memory user list\\. Cleared *{escape_markdown_v2(str(old_count))}* entries\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    await message.answer(f"🧹 Cleaned up in\\-memory user list\\. Cleared **{old_count}** entries\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("reload_config"))
 async def cmd_reload_config(message: Message):
@@ -514,11 +510,11 @@ async def cmd_total_movies(message: Message):
         if db_session:
             count = db_session.query(Movie).count()
             db_session.close()
-            await message.answer(f"📊 Live Indexed Movies in DB: *{escape_markdown_v2(str(count))}*", parse_mode=ParseMode.MARKDOWN_V2)
+            await message.answer(f"📊 Live Indexed Movies in DB: **{count}**", parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await message.answer("❌ Database session unavailable\\.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
-        await message.answer(f"❌ Error fetching movie count: {escape_markdown_v2(str(e))}", parse_mode=ParseMode.MARKDOWN_V2)
+        await message.answer(f"❌ Error fetching movie count: {e}", parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
@@ -548,10 +544,10 @@ async def cmd_stats(message: Message):
     
     stats_text = (
         "📊 Bot Statistics \\(Live\\):\n\n"
-        f"🔍 Total Searches: {escape_markdown_v2(str(bot_stats['total_searches']))}\n"
-        f"⚡ Algolia Searches: {escape_markdown_v2(str(bot_stats['algolia_searches']))}\n"
-        f"👥 Total Unique Users: {escape_markdown_v2(str(len(users_database)))}\n"
-        f"⏱ Uptime: {escape_markdown_v2(str(hours))}h {escape_markdown_v2(str(minutes))}m"
+        f"🔍 Total Searches: {bot_stats['total_searches']}\n"
+        f"⚡ Algolia Searches: {bot_stats['algolia_searches']}\n"
+        f"👥 Total Unique Users: {len(users_database)}\n"
+        f"⏱ Uptime: {hours}h {minutes}m"
     )
     await message.answer(stats_text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -581,17 +577,15 @@ async def cmd_broadcast(message: Message):
     media_type = "📸 photo" if broadcast_photo else ("🎥 video" if broadcast_video else "📝 text")
     status_msg = await message.answer(f"📡 Broadcasting {media_type} to {len(users_database)} users...", parse_mode=ParseMode.MARKDOWN_V2)
     
-    escaped_broadcast_text = escape_markdown_v2(broadcast_text) if broadcast_text else ""
-    
     for user_id_key, user_data in users_database.items():
         try:
             target_user_id = int(user_id_key)
             if broadcast_photo: 
-                await bot.send_photo(chat_id=target_user_id, photo=broadcast_photo, caption=f"📢 Broadcast:\n\n{escaped_broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
+                await bot.send_photo(chat_id=target_user_id, photo=broadcast_photo, caption=f"📢 Broadcast:\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
             elif broadcast_video: 
-                await bot.send_video(chat_id=target_user_id, video=broadcast_video, caption=f"📢 Broadcast:\n\n{escaped_broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
+                await bot.send_video(chat_id=target_user_id, video=broadcast_video, caption=f"📢 Broadcast:\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
             else: 
-                await bot.send_message(chat_id=target_user_id, text=f"📢 Broadcast:\n\n{escaped_broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
+                await bot.send_message(chat_id=target_user_id, text=f"📢 Broadcast:\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
             sent_count += 1
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -600,10 +594,10 @@ async def cmd_broadcast(message: Message):
             logger.error(f"Failed to send broadcast to user {user_id_key}: {e}")
     
     summary = (
-        "✅ Broadcast Complete\\!\n\n" 
-        f"✅ Sent: {escape_markdown_v2(str(sent_count))}\n" 
-        f"🚫 Blocked/Failed: {escape_markdown_v2(str(blocked_count + (len(users_database) - sent_count - blocked_count)))}\n" 
-        f"👥 Total Users: {escape_markdown_v2(str(len(users_database)))}"
+        "✅ Broadcast Complete\!\n\n" 
+        f"✅ Sent: {sent_count}\n" 
+        f"🚫 Blocked/Failed: {blocked_count + (len(users_database) - sent_count - blocked_count)}\n" 
+        f"👥 Total Users: {len(users_database)}"
     )
     await status_msg.edit_text(summary, parse_mode=ParseMode.MARKDOWN_V2)
 
