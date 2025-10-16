@@ -18,7 +18,7 @@ from aiogram.enums import ParseMode
 from sqlalchemy import create_engine, Column, Integer, String, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from algoliasearch.search_client import SearchClient 
+from algoliasearch.search_client import SearchClient # Used SearchClient and Init_Index
 from rapidfuzz import fuzz 
 
 # ====================================================================
@@ -39,7 +39,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 ALGOLIA_APP_ID = os.getenv("ALGOLIA_APPLICATION_ID")
 ALGOLIA_SEARCH_KEY = os.getenv("ALGOLIA_SEARCH_KEY") 
-# 🚨 FIX: Added ALGOLIA_WRITE_KEY environment variable (MUST be set in Render)
+# FIX: Write key is essential for indexing and must be retrieved from environment
 ALGOLIA_WRITE_KEY = os.getenv("ALGOLIA_WRITE_KEY") 
 ALGOLIA_INDEX_NAME = os.getenv("ALGOLIA_INDEX_NAME", "Media_index")
 
@@ -50,7 +50,6 @@ LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", CORRECT_LIBRARY_CHANNEL
 JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 JOIN_GROUP_USERNAME = os.getenv("JOIN_GROUP_USERNAME", "THEGREATMOVIESL9")
 
-# FIX: Added ALGOLIA_WRITE_KEY check
 if not BOT_TOKEN or not ALGOLIA_APP_ID or not ALGOLIA_SEARCH_KEY or not ALGOLIA_WRITE_KEY or not DATABASE_URL:
     logger.warning("⚠️  WARNING: Missing essential environment variables (DB/Token/Algolia Keys)")
     logger.warning("⚠️  Running in DEMO MODE - bot functionality will be limited")
@@ -65,7 +64,7 @@ if not BOT_TOKEN or not ALGOLIA_APP_ID or not ALGOLIA_SEARCH_KEY or not ALGOLIA_
     if not ALGOLIA_SEARCH_KEY:
         ALGOLIA_SEARCH_KEY = "demo_search_key"
     if not ALGOLIA_WRITE_KEY:
-        ALGOLIA_WRITE_KEY = "demo_write_key" # Added dummy write key
+        ALGOLIA_WRITE_KEY = "demo_write_key" 
 
 Base = declarative_base()
 engine = None
@@ -128,7 +127,7 @@ def initialize_db_and_algolia_with_retry(max_retries: int = 5, base_delay: float
                 test_session.close()
                 raise Exception(f"DB health check failed: {e}")
             
-            # FIX: Use the Write Key for Algolia Client (required for indexing)
+            # FIX: Client initialized with Write Key for indexing permission
             algolia_client = SearchClient(ALGOLIA_APP_ID, ALGOLIA_WRITE_KEY) 
             
             algolia_index = algolia_client.init_index(ALGOLIA_INDEX_NAME) 
@@ -197,7 +196,7 @@ def add_user(user_id: int, username: Optional[str] = None, first_name: Optional[
         users_database[user_id] = {"user_id": user_id}
 
 # ====================================================================
-# SYNCHRONOUS Algolia/DB Operations 
+# SYNCHRONOUS Algolia/DB Operations (FIXED with asyncio.to_thread)
 # ====================================================================
 
 def sync_algolia_fuzzy_search(query: str, limit: int = 20) -> List[Dict]:
@@ -209,7 +208,7 @@ def sync_algolia_fuzzy_search(query: str, limit: int = 20) -> List[Dict]:
     bot_stats["total_searches"] += 1
     
     try:
-        # Use Search Key for read operations
+        # Fuzzy Search: Use Search Key for read operations
         search_results = algolia_index.search(
             query=query,
             request_options={
@@ -255,6 +254,7 @@ def sync_add_movie_to_db_and_algolia(title: str, post_id: int):
         db_session.refresh(new_movie)
 
         # 3. Add to Algolia (FIXED: Removed 'body=' keyword to fix TypeError)
+        # FIX: Now using save_object on the correct index object
         algolia_index.save_object(
             { # object is passed directly
                 "objectID": str(new_movie.id),
@@ -317,7 +317,6 @@ async def cmd_start(message: Message):
             f"• /cleanup\\_users \\(Clear in\\-memory user list\\)\n"
             f"• /help \\(List of all commands\\)"
         )
-        # FIX: Ensure ParseMode is used correctly for the Admin Welcome message
         await message.answer(admin_welcome_text, parse_mode=ParseMode.MARKDOWN_V2) 
         logger.info(f"✅ Sent admin welcome to user {user_id}")
         return 
@@ -390,7 +389,8 @@ async def handle_search(message: Message):
         results = await algolia_fuzzy_search(query, limit=20) 
         
         if not results:
-            await message.answer(f"❌ Koi Movie Nahin Mili: **{query}**")
+            # FIX: Added ParseMode for error message
+            await message.answer(f"❌ Koi Movie Nahin Mili: **{query}**", parse_mode=ParseMode.MARKDOWN_V2)
             logger.info(f"❌ No results found for: '{query}'")
             return
         
@@ -448,7 +448,7 @@ async def send_movie_link(callback: types.CallbackQuery):
         
         await bot.send_message(
             chat_id=user_id,
-            text="🔗 **Aapka Link Taiyar Hai!**\n\nIsko dabate hi aapko seedha movie post par le jaaya jaayega.",
+            text="🔗 **Aapka Link Taiyar Hai!**\n\nIsko dabate hi aapko seedha movie post par le jaaya jaayega\\.",
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -476,14 +476,13 @@ async def handle_channel_post(message: Message):
         logger.error(f"Error in handle_channel_post: {e}")
 
 # ====================================================================
-# ADMIN HANDLERS 
+# ADMIN HANDLERS (ParseMode added to all answers)
 # ====================================================================
 
 @dp.message(Command("refresh"))
 async def cmd_refresh(message: Message):
     if not message.from_user or message.from_user.id not in ADMIN_IDS: 
         return
-    # FIX: Added ParseMode.MARKDOWN_V2
     await message.answer("✅ Cloud services are active\\. Auto\\-indexing is on\\.", parse_mode=ParseMode.MARKDOWN_V2) 
 
 @dp.message(Command("cleanup_users"))
@@ -493,14 +492,12 @@ async def cmd_cleanup_users(message: Message):
     
     old_count = len(users_database)
     users_database.clear()
-    # FIX: Added ParseMode.MARKDOWN_V2
     await message.answer(f"🧹 Cleaned up in\\-memory user list\\. Cleared **{old_count}** entries\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("reload_config"))
 async def cmd_reload_config(message: Message):
     if not message.from_user or message.from_user.id not in ADMIN_IDS: 
         return
-    # FIX: Added ParseMode.MARKDOWN_V2
     await message.answer("🔄 Config status: Environment variables are static in Render\\. To apply changes, please manually redeploy the service\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("total_movies"))
@@ -516,12 +513,11 @@ async def cmd_total_movies(message: Message):
         if db_session:
             count = db_session.query(Movie).count()
             db_session.close()
-            # FIX: Added ParseMode.MARKDOWN_V2
             await message.answer(f"📊 Live Indexed Movies in DB: **{count}**", parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await message.answer("❌ Database session unavailable\\.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
-        await message.answer(f"❌ Error fetching movie count: {e}")
+        await message.answer(f"❌ Error fetching movie count: {e}", parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
@@ -531,15 +527,15 @@ async def cmd_help(message: Message):
         
     help_text = (
         "🎬 Admin Panel Commands:\n\n"
-        "1. /stats - Bot के प्रदर्शन (performance) के आँकडे देखें।\n"
-        "2. /broadcast [Message/Photo/Video] - सभी यूज़र्स को संदेश भेजें।\n"
-        "3. /total_movies - Database में Indexed Movies की लाइव संख्या देखें।\n"
-        "4. /refresh - Cloud service status चेक करें।\n"
-        "5. /cleanup_users - Inactive users को हटाएँ।\n"
-        "6. /reload_config - Environment variables की स्थिति देखें।\n\n"
-        "ℹ️ User Logic: Search Algolia द्वारा 20 परिणामों के साथ चलता है। Link Generation Render-Safe है।"
+        "1. /stats \\- Bot के प्रदर्शन \\(performance\\) के आँकडे देखें\\.\n"
+        "2. /broadcast \\[Message/Photo/Video\\] \\- सभी यूज़र्स को संदेश भेजें\\.\n"
+        "3. /total\\_movies \\- Database में Indexed Movies की लाइव संख्या देखें\\.\n"
+        "4. /refresh \\- Cloud service status चेक करें\\.\n"
+        "5. /cleanup\\_users \\- Inactive users को हटाएँ\\.\n"
+        "6. /reload\\_config \\- Environment variables की स्थिति देखें\\.\n\n"
+        "ℹ️ User Logic: Search Algolia द्वारा 20 परिणामों के साथ चलता है\\. Link Generation Render\\-Safe है\\."
     )
-    await message.answer(help_text)
+    await message.answer(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
@@ -550,13 +546,13 @@ async def cmd_stats(message: Message):
     minutes = (uptime_seconds % 3600) // 60
     
     stats_text = (
-        "📊 Bot Statistics (Live):\n\n"
+        "📊 Bot Statistics \\(Live\\):\n\n"
         f"🔍 Total Searches: {bot_stats['total_searches']}\n"
         f"⚡ Algolia Searches: {bot_stats['algolia_searches']}\n"
         f"👥 Total Unique Users: {len(users_database)}\n"
         f"⏱ Uptime: {hours}h {minutes}m"
     )
-    await message.answer(stats_text)
+    await message.answer(stats_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
@@ -573,26 +569,26 @@ async def cmd_broadcast(message: Message):
             broadcast_text = broadcast_text or message.reply_to_message.caption
     
     if not broadcast_text and not broadcast_photo and not broadcast_video:
-        await message.answer("⚠️ Broadcast Usage: Reply to a photo/video with /broadcast or type /broadcast [Your message here].")
+        await message.answer("⚠️ Broadcast Usage: Reply to a photo/video with /broadcast or type /broadcast [Your message here]\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     if not users_database: 
-        await message.answer("⚠️ No users in database yet.")
+        await message.answer("⚠️ No users in database yet\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     sent_count, blocked_count = 0, 0
     media_type = "📸 photo" if broadcast_photo else ("🎥 video" if broadcast_video else "📝 text")
-    status_msg = await message.answer(f"📡 Broadcasting {media_type} to {len(users_database)} users...")
+    status_msg = await message.answer(f"📡 Broadcasting {media_type} to {len(users_database)} users...", parse_mode=ParseMode.MARKDOWN_V2)
     
     for user_id_key, user_data in users_database.items():
         try:
             target_user_id = int(user_id_key)
             if broadcast_photo: 
-                await bot.send_photo(chat_id=target_user_id, photo=broadcast_photo, caption=f"📢 Broadcast:\n\n{broadcast_text}")
+                await bot.send_photo(chat_id=target_user_id, photo=broadcast_photo, caption=f"📢 Broadcast:\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
             elif broadcast_video: 
-                await bot.send_video(chat_id=target_user_id, video=broadcast_video, caption=f"📢 Broadcast:\n\n{broadcast_text}")
+                await bot.send_video(chat_id=target_user_id, video=broadcast_video, caption=f"📢 Broadcast:\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
             else: 
-                await bot.send_message(chat_id=target_user_id, text=f"📢 Broadcast:\n\n{broadcast_text}")
+                await bot.send_message(chat_id=target_user_id, text=f"📢 Broadcast:\n\n{broadcast_text}", parse_mode=ParseMode.MARKDOWN_V2)
             sent_count += 1
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -601,12 +597,12 @@ async def cmd_broadcast(message: Message):
             logger.error(f"Failed to send broadcast to user {user_id_key}: {e}")
     
     summary = (
-        "✅ Broadcast Complete!\n\n" 
+        "✅ Broadcast Complete\!\n\n" 
         f"✅ Sent: {sent_count}\n" 
         f"🚫 Blocked/Failed: {blocked_count + (len(users_database) - sent_count - blocked_count)}\n" 
         f"👥 Total Users: {len(users_database)}"
     )
-    await status_msg.edit_text(summary)
+    await status_msg.edit_text(summary, parse_mode=ParseMode.MARKDOWN_V2)
 
 app_flask = Flask(__name__)
 
