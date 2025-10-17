@@ -1,6 +1,7 @@
 aiogram==3.22.0
 sqlalchemy==2.0.44
-flask==3.1.2
+# Flask aur related packages (Werkzeug, Jinja2, etc.) ko hata diya gaya hai
+# kyuki naye code mein Flask ka istemaal nahin ho raha hai (Worker Process)
 psycopg2-binary==2.9.11
 algoliasearch==3.0.0
 rapidfuzz==3.14.1
@@ -22,12 +23,6 @@ charset-normalizer==3.4.4
 idna==3.11
 urllib3==2.5.0
 greenlet==3.2.4
-Werkzeug==3.1.3
-itsdangerous==2.2.0
-Jinja2==3.1.6
-MarkupSafe==3.0.3
-click==8.3.0
-blinker==1.9.0
 typing-inspection==0.4.2
 annotated-types==0.7.0
 aiohappyeyeballs==2.6.1
