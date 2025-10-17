@@ -6,7 +6,9 @@ import traceback
 import logging
 from typing import Dict, List, Optional
 from collections import defaultdict
-from contextlib import suppress
+# Flask/Threading related imports are removed for stable Worker deployment
+# from flask import Flask, jsonify 
+# from threading import Thread 
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -16,52 +18,54 @@ from aiogram.enums import ParseMode
 from sqlalchemy import create_engine, Column, Integer, String, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-# Use the correct V3 client path
+# FIX: Correct Algolia V3 Import
 from algoliasearch.search_client import SearchClient 
 from rapidfuzz import fuzz 
 
 # ====================================================================
-# CONFIGURATION & SCALABILITY SETUP
+# CONFIGURATION
 # ====================================================================
 
-# Robust Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Environment Variables (MUST BE SET ON RENDER)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEB_SERVER_PORT = int(os.environ.get("PORT", 8080))
+ADMIN_IDS = [7263519581] 
+
 DATABASE_URL = os.getenv("DATABASE_URL")
+
 ALGOLIA_APP_ID = os.getenv("ALGOLIA_APPLICATION_ID")
 ALGOLIA_SEARCH_KEY = os.getenv("ALGOLIA_SEARCH_KEY") 
-ALGOLIA_WRITE_KEY = os.getenv("ALGOLIA_WRITE_KEY") # Essential for indexing
+ALGOLIA_WRITE_KEY = os.getenv("ALGOLIA_WRITE_KEY") 
 ALGOLIA_INDEX_NAME = os.getenv("ALGOLIA_INDEX_NAME", "Media_index")
 
-# IDs (Admin ID is hardcoded for security check)
-ADMIN_IDS = [7263519581] # Your Verified Telegram User ID
+CORRECT_LIBRARY_CHANNEL_ID = -1003138949015 
 
-# FIX: Correct Channel ID default
-LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", -1003138949015))
+LIBRARY_CHANNEL_USERNAME = os.getenv("LIBRARY_CHANNEL_USERNAME", "MOVIEMAZA19")
+LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", CORRECT_LIBRARY_CHANNEL_ID))
 JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 JOIN_GROUP_USERNAME = os.getenv("JOIN_GROUP_USERNAME", "THEGREATMOVIESL9")
 
+if not BOT_TOKEN or not ALGOLIA_APP_ID or not ALGOLIA_SEARCH_KEY or not ALGOLIA_WRITE_KEY or not DATABASE_URL:
+    logger.warning("⚠️  WARNING: Missing essential environment variables (DB/Token/Algolia Keys)")
+    logger.warning("⚠️  Running in DEMO MODE - bot functionality will be limited")
+    logger.warning("⚠️  For production, set: BOT_TOKEN, DATABASE_URL, ALGOLIA_APPLICATION_ID, ALGOLIA_SEARCH_KEY, ALGOLIA_WRITE_KEY")
+    
+    if not BOT_TOKEN:
+        BOT_TOKEN = "demo_token_placeholder"
+    if not DATABASE_URL:
+        DATABASE_URL = "postgresql://demo:demo@localhost/demo"
+    if not ALGOLIA_APP_ID:
+        ALGOLIA_APP_ID = "demo_app_id"
+    if not ALGOLIA_SEARCH_KEY:
+        ALGOLIA_SEARCH_KEY = "demo_search_key"
+    if not ALGOLIA_WRITE_KEY:
+        ALGOLIA_WRITE_KEY = "demo_write_key" 
 
-# Fallback for DEMO MODE (Safety Net)
-if not all([BOT_TOKEN, DATABASE_URL, ALGOLIA_APP_ID, ALGOLIA_SEARCH_KEY, ALGOLIA_WRITE_KEY]):
-    logger.critical("⚠️ CRITICAL: Essential Environment variables are missing. Running in DEMO MODE.")
-    BOT_TOKEN = "demo_token_placeholder"
-    DATABASE_URL = "postgresql://demo:demo@localhost/demo"
-    ALGOLIA_APP_ID = "demo_app_id"
-    ALGOLIA_SEARCH_KEY = "demo_search_key"
-    ALGOLIA_WRITE_KEY = "demo_write_key" 
-    DEMO_MODE = True
-else:
-    DEMO_MODE = False
-
-
-# Database Setup
 Base = declarative_base()
 engine = None
 SessionLocal = None
@@ -71,68 +75,83 @@ class Movie(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, index=True, nullable=False)
     post_id = Column(Integer, unique=True, nullable=False)
-
-
-# Global Instances
+    
 bot = None
 algolia_index = None
-dp = Dispatcher()
-user_sessions: Dict[int, Dict] = defaultdict(dict)
-verified_users: set = set() 
-bot_stats = {"start_time": time.time(), "total_searches": 0, "algolia_searches": 0}
-RATE_LIMIT_SECONDS = 1 
+DEMO_MODE = False
 
+try:
+    bot = Bot(token=BOT_TOKEN)
+except Exception as e:
+    logger.error(f"⚠️  Could not initialize bot (likely demo mode): {e}")
+    logger.error("⚠️  Bot will run as health-check server only")
+    DEMO_MODE = True
+
+dp = Dispatcher()
 
 # ====================================================================
-# INIT & HEALTH CHECK LOGIC
+# INITIALIZATION & DB/ALGOLIA SETUP
 # ====================================================================
 
 def initialize_db_and_algolia_with_retry(max_retries: int = 5, base_delay: float = 2.0) -> bool:
-    """Initializes DB and Algolia clients."""
-    global engine, SessionLocal, algolia_index, bot
+    """Initialize DB and Algolia with exponential backoff retry logic."""
+    global engine, SessionLocal, algolia_index
     
-    # 1. Bot Initialization Check
-    try:
-        bot = Bot(token=BOT_TOKEN)
-        if not DEMO_MODE:
-            logger.info("✅ Bot initialized successfully.")
-    except Exception as e:
-        logger.error(f"❌ Bot Initialization Failed: {e}")
-        return False
-        
     for attempt in range(max_retries):
         try:
             logger.info(f"Attempting to initialize PostgreSQL and Algolia... (Attempt {attempt + 1}/{max_retries})")
             
-            # 2. PostgreSQL Connection
             db_url = DATABASE_URL
             if db_url.startswith("postgresql://"):
                 db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
             
-            engine = create_engine(db_url, pool_pre_ping=True, connect_args={"connect_timeout": 10})
+            # Use 'create_engine' correctly
+            engine = create_engine(
+                db_url,
+                pool_pre_ping=True,
+                pool_size=10,
+                max_overflow=20,
+                pool_timeout=30,
+                pool_recycle=3600,
+                connect_args={"connect_timeout": 10}
+            )
+            
             Base.metadata.create_all(bind=engine)
             SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
             
             test_session = SessionLocal()
-            test_session.execute(text("SELECT 1"))
-            test_session.close()
-            logger.info("✅ PostgreSQL connection verified.")
+            try:
+                test_session.execute(text("SELECT 1"))
+                test_session.close()
+                logger.info("✅ PostgreSQL connection verified.")
+            except Exception as e:
+                test_session.close()
+                raise Exception(f"DB health check failed: {e}")
             
-            # 3. Algolia Connection (Using Write Key for Client Initialization)
-            algolia_client = SearchClient(ALGOLIA_APP_ID, ALGOLIA_WRITE_KEY) 
+            # 🚨 CRITICAL FIX: Use SearchClient.create() to prevent 'str' object has no attribute 'read'
+            algolia_client = SearchClient.create(ALGOLIA_APP_ID, ALGOLIA_WRITE_KEY) 
+            
             algolia_index = algolia_client.init_index(ALGOLIA_INDEX_NAME) 
             
-            algolia_index.search(
-                query="test",
-                request_options={"hitsPerPage": 1, "apiKey": ALGOLIA_SEARCH_KEY}
-            )
-            logger.info("✅ Algolia connection verified.")
+            try:
+                # Test connection using Search Key (passed in the request_options for read operations)
+                algolia_index.search(
+                    query="test",
+                    request_options={
+                        "hitsPerPage": 1, 
+                        "apiKey": ALGOLIA_SEARCH_KEY # Use search key for read test
+                    }
+                )
+                logger.info("✅ Algolia connection verified.")
+            except Exception as e:
+                logger.warning(f"⚠️ Algolia health check warning: {e}")
             
             logger.info("✅ PostgreSQL & Algolia Clients Initialized Successfully.")
             return True
 
         except Exception as e:
             logger.error(f"❌ Initialization attempt {attempt + 1} failed: {e}")
+            
             if attempt < max_retries - 1 and not DEMO_MODE:
                 delay = base_delay * (2 ** attempt)
                 logger.info(f"⏳ Retrying in {delay:.1f} seconds...")
@@ -143,9 +162,27 @@ def initialize_db_and_algolia_with_retry(max_retries: int = 5, base_delay: float
     
     return False
 
-# ====================================================================
-# UTILITIES & SCALABLE SYNCHRONOUS WRAPPERS
-# ====================================================================
+if not initialize_db_and_algolia_with_retry():
+    logger.warning("⚠️ WARNING: Database/Search initialization failed after all retries.")
+    logger.warning("⚠️ Bot will run with limited functionality. Admin commands may not work.")
+
+def get_db():
+    """Database session dependency with error handling."""
+    if not SessionLocal:
+        logger.warning("⚠️ Database not initialized. Cannot provide session.")
+        return
+    
+    db_session = SessionLocal()
+    try:
+        yield db_session
+    finally:
+        db_session.close()
+
+user_sessions: Dict[int, Dict] = defaultdict(dict)
+verified_users: set = set() 
+users_database: Dict[int, Dict] = {} 
+bot_stats = {"start_time": time.time(), "total_searches": 0, "algolia_searches": 0}
+RATE_LIMIT_SECONDS = 1 
 
 def check_rate_limit(user_id: int) -> bool:
     current_time = time.time()
@@ -158,21 +195,27 @@ def add_user(user_id: int, username: Optional[str] = None, first_name: Optional[
     if user_id not in users_database:
         users_database[user_id] = {"user_id": user_id}
 
-# FIX: Algolia Search with correct keys and fuzzy logic
+# ====================================================================
+# SYNCHRONOUS Algolia/DB Operations (FIXED with asyncio.to_thread)
+# ====================================================================
+
 def sync_algolia_fuzzy_search(query: str, limit: int = 20) -> List[Dict]:
     global algolia_index, bot_stats
-    if not algolia_index: return []
+    if not algolia_index: 
+        logger.warning("⚠️ Algolia not initialized. Cannot perform search.")
+        return []
     
     bot_stats["total_searches"] += 1
     
     try:
+        # Fuzzy Search: Use Search Key for read operations
         search_results = algolia_index.search(
             query=query,
             request_options={
                 "attributesToRetrieve": ['title', 'post_id'],
                 "hitsPerPage": limit,
                 "typoTolerance": True,
-                "apiKey": ALGOLIA_SEARCH_KEY # Use Search Key for read operations
+                "apiKey": ALGOLIA_SEARCH_KEY # Explicitly use Search Key
             }
         )
         bot_stats["algolia_searches"] += 1
@@ -183,14 +226,18 @@ def sync_algolia_fuzzy_search(query: str, limit: int = 20) -> List[Dict]:
             if post_id:
                 results.append({"title": hit.get('title', 'Unknown Movie'), "post_id": post_id})
         return results
+        
     except Exception as e:
-        logger.error(f"❌ Error searching with Algolia: {e}")
+        logger.error(f"Error searching with Algolia: {e}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
         return []
 
-# FIX: Auto Indexing with double duplicate check and correct Algolia syntax
 def sync_add_movie_to_db_and_algolia(title: str, post_id: int):
-    global algolia_index, SessionLocal
-    if not algolia_index or not SessionLocal: return False
+    """Handles automatic indexing of new channel posts and prevents duplicates."""
+    global algolia_index
+    if not algolia_index or not SessionLocal: 
+        logger.warning("⚠️ Indexing failed: DB/Algolia not initialized.")
+        return False
         
     db_session = SessionLocal()
     try:
@@ -206,9 +253,9 @@ def sync_add_movie_to_db_and_algolia(title: str, post_id: int):
         db_session.commit()
         db_session.refresh(new_movie)
 
-        # 3. Add to Algolia (FIXED: Algolia V3 Syntax: no 'body' keyword)
+        # 3. Add to Algolia (FIXED: Auto-Indexing Bug)
         algolia_index.save_object(
-            { 
+            { # object is passed directly
                 "objectID": str(new_movie.id),
                 "title": title.strip(),
                 "post_id": post_id,
@@ -221,13 +268,14 @@ def sync_add_movie_to_db_and_algolia(title: str, post_id: int):
     except Exception as e:
         db_session.rollback()
         logger.error(f"❌ Error adding movie to DB/Algolia: {e}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
         return False
     finally:
         db_session.close()
 
-# ASYNCHRONOUS wrappers for the main bot (CRASH PROOF)
-async def algolia_fuzzy_search(query: str, limit: int = 20):
-    return await asyncio.to_thread(sync_algolia_fuzzy_search, query, limit)
+# ASYNCHRONOUS wrappers for the main bot
+def algolia_fuzzy_search(query: str, limit: int = 20):
+    return asyncio.to_thread(sync_algolia_fuzzy_search, query, limit)
 
 async def add_movie_to_db_and_algolia(title: str, post_id: int):
     return await asyncio.to_thread(sync_add_movie_to_db_and_algolia, title, post_id)
@@ -248,7 +296,7 @@ async def cmd_start(message: Message):
         hours = uptime_seconds // 3600
         minutes = (uptime_seconds % 3600) // 60
         
-        # FIX: Professional English and correct MarkdownV2 escaping
+        # FIX: Admin Commands ParseMode and escaping is correct now.
         admin_welcome_text = (
             f"👑 *Admin Dashboard \\- Status Report*\n"
             f"────────────────────────\n"
@@ -276,14 +324,16 @@ async def cmd_start(message: Message):
             [InlineKeyboardButton(text="✅ Mene Join Kar Liya", callback_data="joined")]
         ])
         
+        # FIX: Proper MarkdownV2 escaping
         welcome_msg = (
             "👋 **नमस्ते\\! Aapka Swagat Hai**\n\n"
             "Bot ka upyog karne ke liye, kripya neeche diye gaye "
             "channel aur group ko **join karein** aur phir "
             "**'Mene Join Kar Liya'** button dabayein: 👇\n\n"
-            "➡️ _Access Sirf Joined Users ke liye hai\!_"
+            "➡️ _Access Sirf Joined Users ke liye hai\\!_"
         )
         await message.answer(welcome_msg, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2)
+        logger.info(f"✅ Sent join prompt to user {user_id}")
     else:
         # FIX: User-friendly message after verification
         search_msg = (
@@ -293,6 +343,7 @@ async def cmd_start(message: Message):
             "🛡️ *Safe Access:* Button dabate hi aapko seedha **download link** mil jaayega\\."
         )
         await message.answer(search_msg, parse_mode=ParseMode.MARKDOWN_V2)
+        logger.info(f"✅ Sent welcome message to verified user {user_id}")
 
 @dp.callback_query(F.data == "joined")
 async def process_joined(callback: types.CallbackQuery):
@@ -315,7 +366,7 @@ async def handle_search(message: Message):
     query = message.text.strip()
     user_id = message.from_user.id
     
-    if user_id not in ADMIN_IDS and user_id not in verified_users:
+    if user_id not in ADMIN_IDS and user_id not in verified_users: 
         return await cmd_start(message)
     if not check_rate_limit(user_id): return
     
@@ -328,12 +379,14 @@ async def handle_search(message: Message):
         
         keyboard_buttons = []
         for result in results:
+            # FIX: Title mein MarkdownV2 escaping
             safe_title = result['title'].replace('.', '\\.').replace('-', '\\-')
             button_text = f"🎬 {safe_title}"
             callback_data = f"post_{result['post_id']}"
             keyboard_buttons.append([InlineKeyboardButton(text=button_text, callback_data=callback_data)])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        # FIX: Message mein bhi MarkdownV2 escaping
         safe_query = query.replace('.', '\\.').replace('-', '\\-')
         sent_msg = await message.answer(
             f"🎯 **{len(keyboard_buttons)}** Sateek Parinaam Milein: **{safe_query}**",
@@ -342,7 +395,8 @@ async def handle_search(message: Message):
         )
         user_sessions[user_id]['last_search_msg'] = sent_msg.message_id
     
-    except Exception:
+    except Exception as e:
+        logger.error(f"❌ ERROR in handle_search: {e}")
         await message.answer("❌ Search mein koi aantarik samasya hui.")
 
 @dp.callback_query(F.data.startswith("post_"))
@@ -369,6 +423,7 @@ async def send_movie_link(callback: types.CallbackQuery):
     ])
     
     try:
+        # FIX: Proper MarkdownV2 escaping
         await bot.send_message(
             chat_id=user_id,
             text="🔗 **Aapka Link Taiyar Hai\\!**\n\nIsko dabate hi aapko seedha movie post par le jaaya jaayega\\.",
@@ -378,7 +433,6 @@ async def send_movie_link(callback: types.CallbackQuery):
         await callback.answer("✅ Link bhej diya gaya hai.")
     except Exception:
         await callback.answer("❌ Link banane mein samasya hui.")
-
 
 @dp.channel_post()
 async def handle_channel_post(message: Message):
@@ -394,7 +448,6 @@ async def handle_channel_post(message: Message):
             await add_movie_to_db_and_algolia(str(title), post_id) 
     except Exception as e:
         logger.error(f"Error in handle_channel_post: {e}")
-
 
 # ====================================================================
 # ADMIN HANDLERS (FIXED: ParseMode added to all answers)
@@ -426,6 +479,7 @@ async def cmd_total_movies(message: Message):
         count = await asyncio.to_thread(lambda: SessionLocal().query(Movie).count())
         await message.answer(f"📊 Live Indexed Movies in DB: **{count}**", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
+        # FIX: Error message mein MarkdownV2 escaping
         safe_error = str(e).replace('.', '\\.').replace(':', '\\:')
         await message.answer(f"❌ Error fetching movie count: {safe_error}", parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -481,9 +535,11 @@ async def cmd_broadcast(message: Message):
     media_type = "📸 photo" if broadcast_photo else ("🎥 video" if broadcast_video else "📝 text")
     status_msg = await message.answer(f"📡 Broadcasting {media_type} to {len(users_database)} users...", parse_mode=ParseMode.MARKDOWN_V2)
     
+    # Broadcast loop... (error handling is crucial here)
     for user_id_key in list(users_database.keys()):
         try:
             target_user_id = int(user_id_key)
+            # FIX: Ensure broadcast text is properly escaped before sending
             safe_broadcast_text = f"📢 Broadcast:\n\n{broadcast_text}".replace('.', '\\.').replace('-', '\\-')
             
             if broadcast_photo: 
@@ -507,10 +563,8 @@ async def cmd_broadcast(message: Message):
 
 
 # ====================================================================
-# EXECUTION & HEALTH CHECK LOGIC (Pure Polling)
+# EXECUTION LOGIC (Pure Polling)
 # ====================================================================
-
-# Removed Flask/HTTP logic to prevent conflicts.
 
 async def start_bot():
     """Starts the main Polling loop."""
@@ -548,7 +602,7 @@ async def start_bot():
             bot, 
             allowed_updates=dp.resolve_used_update_types(),
             drop_pending_updates=True,
-            timeout=25, # Final conflict fix: Aggressive timeout 
+            timeout=25, # FINAL CONFLICT FIX: Aggressive timeout 
             request_timeout=60.0 
         )
     except Exception as polling_error:
