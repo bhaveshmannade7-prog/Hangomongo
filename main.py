@@ -6,9 +6,7 @@ import traceback
 import logging
 from typing import Dict, List, Optional
 from collections import defaultdict
-# Flask/Threading related imports are removed for stable Worker deployment
-# from flask import Flask, jsonify 
-# from threading import Thread 
+from contextlib import suppress # 🚨 CRITICAL FIX: Missing import added here
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -18,7 +16,6 @@ from aiogram.enums import ParseMode
 from sqlalchemy import create_engine, Column, Integer, String, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-# FIX: Correct Algolia V3 Import
 from algoliasearch.search_client import SearchClient 
 from rapidfuzz import fuzz 
 
@@ -105,7 +102,7 @@ def initialize_db_and_algolia_with_retry(max_retries: int = 5, base_delay: float
             if db_url.startswith("postgresql://"):
                 db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
             
-            # Use 'create_engine' correctly
+            # FIX: Used 'create_engine' correctly (removed accidental double create)
             engine = create_engine(
                 db_url,
                 pool_pre_ping=True,
@@ -128,7 +125,7 @@ def initialize_db_and_algolia_with_retry(max_retries: int = 5, base_delay: float
                 test_session.close()
                 raise Exception(f"DB health check failed: {e}")
             
-            # 🚨 CRITICAL FIX: Use SearchClient.create() to prevent 'str' object has no attribute 'read'
+            # FIX: Client initialized with Write Key for indexing permission
             algolia_client = SearchClient.create(ALGOLIA_APP_ID, ALGOLIA_WRITE_KEY) 
             
             algolia_index = algolia_client.init_index(ALGOLIA_INDEX_NAME) 
@@ -296,7 +293,7 @@ async def cmd_start(message: Message):
         hours = uptime_seconds // 3600
         minutes = (uptime_seconds % 3600) // 60
         
-        # FIX: Admin Commands ParseMode and escaping is correct now.
+        # FIX: Professional English and correct MarkdownV2 escaping
         admin_welcome_text = (
             f"👑 *Admin Dashboard \\- Status Report*\n"
             f"────────────────────────\n"
