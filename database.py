@@ -30,6 +30,7 @@ class Movie(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     imdb_id = Column(String(50), unique=True, nullable=False, index=True)
     title = Column(String, nullable=False)
+    # Yeh column tabhi theek se kaam karega jab aap database migration kar lenge.
     clean_title = Column(String, nullable=False, index=True) 
     year = Column(String(10), nullable=True)
     file_id = Column(String, nullable=False)
@@ -96,19 +97,32 @@ class Database:
     
     async def get_movie_count(self):
         session = self.get_session()
-        try: return session.query(Movie).count()
+        try: 
+            # FIX: Only query for a simple count, avoiding issues with missing 'clean_title' column
+            return session.query(func.count(Movie.id)).scalar()
         finally: session.close()
 
     async def get_movie_by_imdb(self, imdb_id: str):
         session = self.get_session()
         try:
             movie = session.query(Movie).filter(Movie.imdb_id == imdb_id).first()
-            return {c.name: getattr(movie, c.name) for c in movie.__table__.columns} if movie else None
+            if movie:
+                # FIX: Return only necessary attributes to avoid accessing the potentially missing 'clean_title' property
+                return {
+                    'imdb_id': movie.imdb_id,
+                    'title': movie.title,
+                    'year': movie.year,
+                    'file_id': movie.file_id,
+                    'channel_id': movie.channel_id,
+                    'message_id': movie.message_id,
+                }
+            return None
         finally: session.close()
 
     async def super_search_movies(self, query: str, limit: int = 20):
         session = self.get_session()
         try:
+            # NOTE: Is search ko kaam karne ke liye 'clean_title' column ka database mein hona zaroori hai.
             search_pattern = '%' + '%'.join(query.split()) + '%'
             potential_matches = session.query(Movie).filter(
                 Movie.clean_title.ilike(search_pattern)
