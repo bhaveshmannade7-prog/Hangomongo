@@ -14,7 +14,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from database import Database
+from database import Database, clean_text_for_search
 
 # --- Step 1: Sabhi Variables aur IDs ---
 load_dotenv()
@@ -64,11 +64,10 @@ async def bot_webhook(update: dict):
     telegram_update = Update(**update)
     await dp.feed_update(bot=bot, update=telegram_update)
 
-# --- Step 3: Helper Functions + UPGRADED Search Processor ---
+# --- Step 3: Helper Functions ---
 
 def get_uptime():
     delta = datetime.utcnow() - start_time
-    # ... (Uptime logic)
     hours, remainder = divmod(int(delta.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
     days, hours = divmod(hours, 24)
@@ -92,33 +91,20 @@ def get_join_keyboard():
         [InlineKeyboardButton(text="✅ I Joined Both", callback_data="check_join")]
     ])
 
-def clean_text_for_search(text: str) -> str:
-    # Yeh function title aur search query, dono ko saaf karta hai
-    text = text.lower()
-    # "season 1", "s1", "complete season" jaise shabdon ko aasan banata hai
-    text = re.sub(r'\b(s|season|seson|sisan)\s*(\d{1,2})\b', r's\2', text)
-    text = re.sub(r'complete season', '', text)
-    # Special characters hatata hai
-    text = re.sub(r'[\W_]+', ' ', text)
-    return text.strip()
-
 def extract_movie_info(caption: str):
     if not caption: return None
     info = {}
-    imdb_match = re.search(r'(tt\d{7,})', caption)
-    if imdb_match: info['imdb_id'] = imdb_match.group(1)
-    
     lines = caption.strip().split('\n')
     if lines:
         title = lines[0].strip()
         if len(lines) > 1 and re.search(r'S\d{1,2}', lines[1], re.IGNORECASE):
              title += " " + lines[1].strip()
         info['title'] = title
-        
+    imdb_match = re.search(r'(tt\d{7,})', caption)
+    if imdb_match: info['imdb_id'] = imdb_match.group(1)
     year_match = re.search(r'\b(19|20)\d{2}\b', caption)
     if year_match: info['year'] = year_match.group(0)
-    
-    return info if 'imdb_id' in info or 'title' in info else None
+    return info if 'title' in info else None
 
 # --- Step 4: Sabhi Features (Handlers) ---
 
@@ -171,7 +157,7 @@ async def search_movie_handler(message: types.Message):
 
     searching_msg = await message.answer(f"🔍 <b>'{original_query}'</b>... dhoondh rahe hain...")
     
-    # UPGRADED SEARCH LOGIC
+    # UPGRADED SUPER SEARCH LOGIC
     processed_query = clean_text_for_search(original_query)
     best_results = await db.super_search_movies(processed_query, limit=20)
 
@@ -205,7 +191,9 @@ async def auto_index_handler(message: types.Message):
     if message.chat.id != LIBRARY_CHANNEL_ID or not (message.video or message.document): return
     caption = message.caption or ""
     movie_info = extract_movie_info(caption)
-    if not movie_info: return
+    if not movie_info: 
+        logger.warning(f"Auto-index failed: Could not extract info from caption: {caption[:50]}")
+        return
     
     file_id = message.video.file_id if message.video else message.document.file_id
     imdb_id = movie_info.get('imdb_id', f'auto_{message.message_id}')
@@ -215,19 +203,20 @@ async def auto_index_handler(message: types.Message):
         return
         
     success = await db.add_movie(
-        imdb_id=imdb_id, title=movie_info.get('title', 'Unknown'), year=movie_info.get('year'),
+        imdb_id=imdb_id, title=movie_info.get('title'), year=movie_info.get('year'),
         file_id=file_id, channel_id=LIBRARY_CHANNEL_ID, message_id=message.message_id
     )
     if success: logger.info(f"✅ Auto-indexed: {movie_info.get('title')}")
+    else: logger.error(f"Auto-index database error for: {movie_info.get('title')}")
 
 # --- Admin Features (Ab Theek se Chalenge) ---
 @dp.message(Command("help"), AdminFilter())
 async def admin_help(message: types.Message):
     await message.answer("""👑 <b>Admin Command Panel</b> 👑
 /stats - Bot ke live statistics dekhein.
-/broadcast - Sabhi users ko message bhejein.
+/broadcast - Sabhi users ko message bhejein (reply karke).
 /cleanup_users - 30 din se inactive users ko deactivate karein.
-/add_movie - Kisi movie ko manual roop se add karein.""")
+/add_movie - Kisi movie ko manual roop se add karein (reply karke).""")
 
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
@@ -241,25 +230,57 @@ async def stats_command(message: types.Message):
 
 @dp.message(Command("broadcast"), AdminFilter())
 async def broadcast_command(message: types.Message):
-    # ... (Broadcast logic) ...
     if not message.reply_to_message:
         await message.answer("❌ Broadcast karne ke liye kisi message ko reply karein.")
         return
     
     users = await db.get_all_users()
-    # ... (baaki broadcast logic)
+    total_users = len(users)
+    success, failed = 0, 0
+    progress_msg = await message.answer(f"📤 Broadcasting to {total_users} users...")
+    
+    for user_id in users:
+        try:
+            await message.reply_to_message.copy_to(user_id)
+            success += 1
+        except: failed += 1
+        if (success + failed) % 100 == 0:
+            await progress_msg.edit_text(f"📤 Broadcasting...\n✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}")
+        await asyncio.sleep(0.05)
+    
+    await progress_msg.edit_text(f"✅ <b>Broadcast Complete!</b>\n\n- Success: {success}\n- Failed: {failed}")
 
 @dp.message(Command("cleanup_users"), AdminFilter())
 async def cleanup_users_command(message: types.Message):
     await message.answer("🧹 Inactive users ko clean kar rahe hain...")
     removed_count = await db.cleanup_inactive_users(days=30)
     new_count = await db.get_user_count()
-    await message.answer(f"✅ Cleanup complete!\n- Deactivated: {removed_count} users\n- Active Users: {new_count}")
+    await message.answer(f"✅ Cleanup complete!\n- Deactivated: {removed_count} users\n- Active Users now: {new_count}")
 
 @dp.message(Command("add_movie"), AdminFilter())
 async def add_movie_command(message: types.Message):
-    # ... (add_movie logic) ...
     if not message.reply_to_message or not (message.reply_to_message.video or message.reply_to_message.document):
         await message.answer("❌ Movie file ko reply karke command likhein: `/add_movie imdb_id | title | year`")
         return
-    # ... (baaki add_movie logic)
+    
+    try:
+        parts = message.text.replace('/add_movie', '').strip().split('|')
+        imdb_id = parts[0].strip()
+        title = parts[1].strip()
+        year = parts[2].strip() if len(parts) > 2 else None
+    except:
+        await message.answer("❌ Format galat hai. Use: `/add_movie imdb_id | title | year`")
+        return
+
+    if await db.get_movie_by_imdb(imdb_id):
+        await message.answer("⚠️ Is IMDB ID se movie pehle se hai!")
+        return
+        
+    file_id = message.reply_to_message.video.file_id if message.reply_to_message.video else message.reply_to_message.document.file_id
+    success = await db.add_movie(
+        imdb_id=imdb_id, title=title, year=year, file_id=file_id, 
+        channel_id=message.reply_to_message.chat.id, 
+        message_id=message.reply_to_message.message_id
+    )
+    if success: await message.answer(f"✅ Movie '{title}' add ho gayi hai.")
+    else: await message.answer("❌ Movie add karne mein error aaya.")
