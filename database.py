@@ -9,18 +9,16 @@ logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 def clean_text_for_search(text: str) -> str:
-    # Yeh function title aur search query, dono ko saaf karta hai
     text = text.lower()
-    # "season 1", "s1", "complete season" jaise shabdon ko aasan banata hai
     text = re.sub(r'\b(s|season|seson|sisan)\s*(\d{1,2})\b', r's\2', text)
     text = re.sub(r'complete season', '', text)
-    # Special characters hatata hai
     text = re.sub(r'[\W_]+', ' ', text)
     return text.strip()
 
 class User(Base):
     __tablename__ = 'users'
-    user_id = Column(BigInteger, primary_key=True)
+    # Galti yahan thi. Ab user_id primary key hai.
+    user_id = Column(BigInteger, primary_key=True) 
     username = Column(String, nullable=True)
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
@@ -33,7 +31,6 @@ class Movie(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     imdb_id = Column(String(50), unique=True, nullable=False, index=True)
     title = Column(String, nullable=False)
-    # NEW: Saaf kiya hua title, search ke liye
     clean_title = Column(String, nullable=False, index=True) 
     year = Column(String(10), nullable=True)
     file_id = Column(String, nullable=False)
@@ -110,34 +107,23 @@ class Database:
             return {c.name: getattr(movie, c.name) for c in movie.__table__.columns} if movie else None
         finally: session.close()
 
-    # --- NEW SUPER-SMART SEARCH FUNCTION ---
     async def super_search_movies(self, query: str, limit: int = 20):
         session = self.get_session()
         try:
-            # Step 1: Database se jald se jald milte-julte naam nikalein
             search_pattern = '%' + '%'.join(query.split()) + '%'
-            
             potential_matches = session.query(Movie).filter(
                 Movie.clean_title.ilike(search_pattern)
             ).limit(100).all()
-
             if not potential_matches:
                 return []
-
-            # Step 2: Ab in 100 results par Python ki fuzzy search lagayein
             choices = {movie.title: movie for movie in potential_matches}
-            
-            # process.extract zyada smart hai, typos ko a_chhe se handle karta hai
             results = process.extract(query, choices.keys(), limit=limit)
-            
             final_list = []
             for title, score in results:
-                if score > 45: # Thoda kam score bhi aane dein, taaki "avgar" jaisi query kaam kare
+                if score > 45:
                     movie_obj = choices[title]
                     final_list.append({'imdb_id': movie_obj.imdb_id, 'title': movie_obj.title})
-            
             return final_list
-
         except Exception as e:
             logger.error(f"Super search mein error: {e}")
             return []
