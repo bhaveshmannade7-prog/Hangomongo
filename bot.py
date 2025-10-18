@@ -10,6 +10,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
+# YEH NAYI LINE HAI ERROR THEEK KARNE KE LIYE
+from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -29,12 +31,12 @@ USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "@THEGREATMOVIESL9")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- Step 2: Naye, Stable Architecture ke liye Webhook Setup ---
-# Yeh Render par bot ko 24/7 online aur super stable rakhega
 DETA_PROJECT_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME") # Render ke liye
 WEBHOOK_PATH = f"/bot/{BOT_TOKEN}"
 WEBHOOK_URL = f"https://{DETA_PROJECT_URL}{WEBHOOK_PATH}"
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+# YEH LINE BADLI GAYI HAI ERROR THEEK KARNE KE LIYE
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
@@ -42,11 +44,9 @@ start_time = datetime.utcnow()
 # --- FastAPI App (Bot ko Web Service banane ke liye) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Bot start hone par webhook set karega
     await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
     logger.info(f"Webhook set to: {WEBHOOK_URL}")
     yield
-    # Bot band hone par webhook hata dega
     await bot.delete_webhook()
     logger.info("Webhook deleted.")
 
@@ -95,7 +95,7 @@ def extract_movie_info(caption: str):
         title = lines[0].strip()
         if len(lines) > 1 and re.search(r'S\d{1,2}E\d{1,2}', lines[1], re.IGNORECASE):
              title += " " + lines[1].strip()
-        info['title'] = re.sub(r'^\s*🌸\s*|\s*🌸\s*🍀\s*$', '', title).strip() # Emojis hatane ke liye
+        info['title'] = re.sub(r'^\s*🌸\s*|\s*🌸\s*🍀\s*$', '', title).strip()
         
     year_match = re.search(r'\b(19|20)\d{2}\b', caption)
     if year_match: info['year'] = year_match.group(0)
@@ -109,11 +109,8 @@ def extract_movie_info(caption: str):
     return info if 'imdb_id' in info or 'title' in info else None
 
 def preprocess_search_query(query: str) -> str:
-    # Yeh function user ki query ko search se pehle saaf aur behtar banata hai
     query = query.lower()
-    # "season 1", "sisan 1", "s 1" etc. ko "s1" mein badalta hai
     query = re.sub(r'\b(s|season|seson|sisan)\s*(\d{1,2})\b', r's\2', query)
-    # "episode 1", "ep 1" etc. ko "e1" mein badalta hai
     query = re.sub(r'\b(e|episode|ep)\s*(\d{1,2})\b', r'e\2', query)
     return query
 
@@ -126,7 +123,6 @@ async def start_command(message: types.Message):
     await db.add_user(user_id, message.from_user.username, first_name, message.from_user.last_name)
     
     if user_id == ADMIN_USER_ID:
-        # Aapka original Admin welcome message
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count()
         admin_message = (f"👑 <b>Welcome Boss!</b>\n\n"
@@ -140,7 +136,6 @@ async def start_command(message: types.Message):
                          f"<i>Auto-index is enabled! /help for admin commands.</i>")
         await message.answer(admin_message)
     else:
-        # Aapka original user welcome message
         if not await check_user_membership(user_id):
             welcome_message = f"""👋 <b>नमस्ते {first_name}!</b>
 
@@ -152,6 +147,7 @@ async def start_command(message: types.Message):
 <i>दोनों join करने के बाद "✅ I Joined Both" बटन दबाएं</i>"""
             await message.answer(welcome_message, reply_markup=get_join_keyboard())
         else:
+            movie_count = await db.get_movie_count()
             welcome_message = f"""🎬 <b>स्वागत है {first_name}!</b>
 
 मैं आपका मूवी सर्च असिस्टेंट हूं। बस मूवी का नाम टाइप करें!
@@ -159,7 +155,7 @@ async def start_command(message: types.Message):
 ✨ <b>Features:</b>
 • तेज़ और सटीक सर्च
 • High-quality मूवी results
-• {await db.get_movie_count():,}+ मूवीज़ का कलेक्शन
+• {movie_count:,}+ मूवीज़ का कलेक्शन
 
 💡 <b>कैसे यूज़ करें:</b>
 किसी भी मूवी का नाम टाइप करें और सर्च करें!
@@ -197,7 +193,6 @@ async def search_movie_handler(message: types.Message):
 
     searching_msg = await message.answer(f"🔍 <b>'{original_query}'</b>... खोज रहे हैं...")
     
-    # User ki query ko behtar banakar search karein
     processed_query = preprocess_search_query(original_query)
     best_results = await db.search_movies_fuzzy(processed_query, limit=20)
 
@@ -256,6 +251,20 @@ async def auto_index_handler(message: types.Message):
 async def is_admin(message: types.Message) -> bool:
     return message.from_user.id == ADMIN_USER_ID
 
+@dp.message(Command("help"), F.func(is_admin))
+async def admin_help(message: types.Message):
+    help_text = """
+👑 <b>Admin Commands</b> 👑
+/stats - Detailed bot statistics.
+/broadcast - Reply to a message to broadcast it.
+/total_movies - View total indexed movies.
+/cleanup_users - Remove inactive users.
+/daily_report - Get a daily summary.
+/system_health - Check system status.
+/add_movie - Manually add a movie.
+"""
+    await message.answer(help_text)
+
 @dp.message(Command("stats", "total_movies", "system_health", "daily_report"), F.func(is_admin))
 async def stats_command(message: types.Message):
     user_count = await db.get_user_count()
@@ -268,7 +277,6 @@ async def stats_command(message: types.Message):
 
 @dp.message(Command("broadcast"), F.func(is_admin))
 async def broadcast_command(message: types.Message):
-    # ... (Broadcast logic from previous correct version) ...
     if not message.reply_to_message:
         await message.answer("❌ Broadcast karne ke liye kisi message ko reply karein.")
         return
@@ -301,7 +309,6 @@ async def cleanup_users_command(message: types.Message):
 
 @dp.message(Command("add_movie"), F.func(is_admin))
 async def add_movie_command(message: types.Message):
-    # ... (add_movie logic from previous correct version) ...
     if not message.reply_to_message or not (message.reply_to_message.video or message.reply_to_message.document):
         await message.answer("❌ Movie file ko reply karke command likhein: `/add_movie imdb_id | title | year`")
         return
