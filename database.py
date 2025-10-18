@@ -1,7 +1,6 @@
 import logging
 import re
 from datetime import datetime, timedelta
-# Asynchronous SQLAlchemy imports
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_scoped_session
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select
@@ -12,7 +11,6 @@ logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 def clean_text_for_search(text: str) -> str:
-    """Text ko search ke liye saaf aur optimize karta hai."""
     text = text.lower()
     text = re.sub(r'\b(s|season|seson|sisan)\s*(\d{1,2})\b', r's\2', text)
     text = re.sub(r'complete season', '', text)
@@ -43,13 +41,24 @@ class Movie(Base):
 
 class Database:
     def __init__(self, database_url: str):
-        # FIX: Agar URL 'postgresql://' se shuru hoti hai, toh use async driver ke liye theek karein.
+        
+        connect_args = {}
+        # FIX: asyncpg error ke liye sslmode ko connect_args mein pass karein
+        if '?sslmode=require' in database_url:
+            database_url = database_url.replace('?sslmode=require', '')
+            connect_args['ssl'] = True
+        
+        # FIX: Agar URL mein async driver missing ho to usko theek karein
         if database_url.startswith('postgresql://'):
             database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
         elif database_url.startswith('postgres://'):
             database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
             
-        self.engine = create_async_engine(database_url, echo=False)
+        self.engine = create_async_engine(
+            database_url, 
+            echo=False,
+            connect_args=connect_args # Yahan se SSL setting jayegi
+        )
         self.SessionLocal = async_scoped_session(
             sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession),
             scopefunc=lambda: None
@@ -57,7 +66,6 @@ class Database:
         logger.info("✅ Database engine initialized for async operations.")
     
     async def init_db(self):
-        """Database mein tables ko create karta hai agar woh maujood nahi hain."""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("✅ Database tables checked/created successfully.")
@@ -65,27 +73,22 @@ class Database:
     def get_session(self) -> AsyncSession: return self.SessionLocal()
 
     async def add_user(self, user_id, username, first_name, last_name):
-        """User ko add ya last_active time update karta hai."""
         session = self.get_session()
         try:
             result = await session.execute(select(User).filter(User.user_id == user_id))
             user = result.scalar_one_or_none()
-            
             if user:
                 user.last_active = datetime.utcnow()
                 user.is_active = True
             else:
                 session.add(User(user_id=user_id, username=username, first_name=first_name, last_name=last_name))
-            
             await session.commit()
         finally: await session.close()
 
     async def get_concurrent_user_count(self, minutes: int = 5):
-        """Pichhle 'minutes' mein active users ki sankhaya count karta hai."""
         session = self.get_session()
         try:
             cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
-            
             result = await session.execute(
                 select(func.count(User.user_id))
                 .filter(User.last_active >= cutoff_time)
@@ -95,7 +98,6 @@ class Database:
         finally: await session.close()
 
     async def get_all_users(self):
-        """Sabhi active users ki ID list return karta hai (Broadcast ke liye)."""
         session = self.get_session()
         try: 
             result = await session.execute(select(User.user_id).filter(User.is_active == True))
@@ -103,7 +105,6 @@ class Database:
         finally: await session.close()
     
     async def get_user_count(self):
-        """Database mein total users ki sankhaya count karta hai."""
         session = self.get_session()
         try: 
             result = await session.execute(select(func.count(User.user_id)))
@@ -111,7 +112,6 @@ class Database:
         finally: await session.close()
 
     async def cleanup_inactive_users(self, days: int):
-        """Nirdharit dinon se inactive users ko deactivate karta hai."""
         session = self.get_session()
         try:
             cutoff_date = datetime.utcnow() - timedelta(days=days)
@@ -126,7 +126,6 @@ class Database:
         finally: await session.close()
 
     async def add_movie(self, imdb_id, title, year, file_id, message_id, channel_id):
-        """Nayi movie ko database mein jodta hai."""
         session = self.get_session()
         try:
             clean_title = clean_text_for_search(title)
@@ -144,7 +143,6 @@ class Database:
         finally: await session.close()
     
     async def get_movie_count(self):
-        """Database mein total movies ki sankhaya count karta hai."""
         session = self.get_session()
         try: 
             result = await session.execute(select(func.count(Movie.id)))
@@ -152,7 +150,6 @@ class Database:
         finally: await session.close()
 
     async def get_movie_by_imdb(self, imdb_id: str):
-        """IMDB ID se movie details laata hai."""
         session = self.get_session()
         try:
             result = await session.execute(
@@ -172,12 +169,10 @@ class Database:
         finally: await session.close()
 
     async def super_search_movies(self, query: str, limit: int = 20):
-        """Fuzzy matching ke saath advanced movie search karta hai."""
         session = self.get_session()
         try:
             search_pattern = '%' + '%'.join(query.split()) + '%'
             
-            # CPU efficiency ke liye 50 potential matches fetch karein
             result = await session.execute(
                 select(Movie.imdb_id, Movie.title)
                 .filter(Movie.clean_title.ilike(search_pattern))
@@ -190,12 +185,10 @@ class Database:
             
             choices = {title: imdb_id for imdb_id, title in potential_matches}
             
-            # Final result limit 20 rakha gaya hai
             results = process.extract(query, choices.keys(), limit=limit) 
             
             final_list = []
             for title, score in results:
-                # High quality match (Score 65 se upar)
                 if score > 65:  
                     imdb_id = choices[title] 
                     final_list.append({'imdb_id': imdb_id, 'title': title})
