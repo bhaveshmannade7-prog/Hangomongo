@@ -1,8 +1,12 @@
-aiogram
-python-dotenv
-SQLAlchemy
-psycopg2-binary
-thefuzz
-python-levenshtein
+# Core Frameworks for FastAPI and Aiogram (Bot)
 fastapi
-uvicorn
+uvicorn[standard]
+aiogram>=3.0
+
+# Database Access (Asynchronous PostgreSQL/Neon)
+SQLAlchemy>=2.0
+asyncpg  # FIX: Yeh missing asynchronous driver hai jo error de raha tha.
+
+# Utility and Configuration
+python-dotenv
+python-thefuzz[speedup] # Fuzzy search performance ke liye
