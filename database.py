@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 def clean_text_for_search(text: str) -> str:
-    """Text ko search ke liye saaf aur optimize karta hai (lowercase, special chars removed)."""
+    """Text ko search ke liye saaf aur optimize karta hai."""
     text = text.lower()
     text = re.sub(r'\b(s|season|seson|sisan)\s*(\d{1,2})\b', r's\2', text)
     text = re.sub(r'complete season', '', text)
@@ -27,7 +27,7 @@ class User(Base):
     last_name = Column(String, nullable=True)
     joined_date = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
-    last_active = Column(DateTime, default=datetime.utcnow) # Concurrency tracking ke liye upyog hoga
+    last_active = Column(DateTime, default=datetime.utcnow)
 
 class Movie(Base):
     __tablename__ = 'movies'
@@ -43,7 +43,12 @@ class Movie(Base):
 
 class Database:
     def __init__(self, database_url: str):
-        # FIX: Asynchronous engine ka upyog karein (eg. 'postgresql+asyncpg://')
+        # FIX: Agar URL 'postgresql://' se shuru hoti hai, toh use async driver ke liye theek karein.
+        if database_url.startswith('postgresql://'):
+            database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
+        elif database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
+            
         self.engine = create_async_engine(database_url, echo=False)
         self.SessionLocal = async_scoped_session(
             sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession),
@@ -155,7 +160,6 @@ class Database:
             )
             movie = result.scalar_one_or_none()
             if movie:
-                # Sirf zaroori attributes return karein
                 return {
                     'imdb_id': movie.imdb_id,
                     'title': movie.title,
@@ -173,7 +177,7 @@ class Database:
         try:
             search_pattern = '%' + '%'.join(query.split()) + '%'
             
-            # 30k movies ke liye, initial fetch ko 50 tak hi seemit rakhein (Crash prevention)
+            # CPU efficiency ke liye 50 potential matches fetch karein
             result = await session.execute(
                 select(Movie.imdb_id, Movie.title)
                 .filter(Movie.clean_title.ilike(search_pattern))
@@ -185,11 +189,13 @@ class Database:
                 return []
             
             choices = {title: imdb_id for imdb_id, title in potential_matches}
-            results = process.extract(query, choices.keys(), limit=limit)
+            
+            # Final result limit 20 rakha gaya hai
+            results = process.extract(query, choices.keys(), limit=limit) 
             
             final_list = []
             for title, score in results:
-                # Score 65 ya usse zyada (High quality match)
+                # High quality match (Score 65 se upar)
                 if score > 65:  
                     imdb_id = choices[title] 
                     final_list.append({'imdb_id': imdb_id, 'title': title})
