@@ -2,6 +2,8 @@ fastapi
 uvicorn[standard]
 aiogram>=3.0
 SQLAlchemy>=2.0
-asyncpg  
+asyncpg
 python-dotenv
-python-thefuzz
+thefuzz         
+rapidfuzz  
+
