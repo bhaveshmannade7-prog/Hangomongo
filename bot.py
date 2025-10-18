@@ -22,7 +22,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "7263519581"))
+# NOTE: Jab aap apna ADMIN_USER_ID set karein, to is default value ko apne ID se badal dein.
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "7263519581")) 
 LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", "-1003138949015"))
 JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
@@ -51,6 +52,7 @@ class AdminFilter(BaseFilter):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if RENDER_EXTERNAL_HOSTNAME:
+        # NOTE: Agar koi error aaye toh 'await bot.get_webhook_info()' se debug karein.
         await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
         logger.info(f"Webhook set to: {WEBHOOK_URL}")
     yield
@@ -76,13 +78,16 @@ def get_uptime():
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
+    # NOTE: Agar koi error aaye to try/except block hata kar debug karein ki error kya hai.
     try:
         channel_member = await bot.get_chat_member(f"@{JOIN_CHANNEL_USERNAME}", user_id)
         if channel_member.status not in ['member', 'administrator', 'creator']: return False
         group_member = await bot.get_chat_member(f"@{USER_GROUP_USERNAME}", user_id)
         if group_member.status not in ['member', 'administrator', 'creator']: return False
         return True
-    except: return False
+    except Exception as e:
+        logger.error(f"Membership check error for user {user_id}: {e}")
+        return False
 
 def get_join_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -117,7 +122,7 @@ async def start_command(message: types.Message):
     if user_id == ADMIN_USER_ID:
         # NEW Professional Admin Welcome Message
         user_count = await db.get_user_count()
-        movie_count = await db.get_movie_count()
+        movie_count = await db.get_movie_count() # FIXED: Ab ye database error nahi dega.
         admin_message = (f"👑 <b>Welcome Boss!</b>\n\n"
                          f"Aapka Movie Search Bot poori tarah se operational hai.\n\n"
                          f"<u><b>System Overview:</b></u>\n"
@@ -159,7 +164,8 @@ async def search_movie_handler(message: types.Message):
     
     # UPGRADED SUPER SEARCH LOGIC
     processed_query = clean_text_for_search(original_query)
-    best_results = await db.super_search_movies(processed_query, limit=20)
+    # NOTE: Agar database migration nahi hua hai, to super_search_movies mein error aa sakta hai.
+    best_results = await db.super_search_movies(processed_query, limit=20) 
 
     if not best_results:
         await searching_msg.edit_text(f"🥲 Maaf kijiye, <b>'{original_query}'</b> ke liye koi result nahi mila. Ek baar spelling check karke dekhein?")
@@ -172,7 +178,7 @@ async def search_movie_handler(message: types.Message):
 async def get_movie_callback(callback: types.CallbackQuery):
     await callback.answer("File forward kar rahe hain...")
     imdb_id = callback.data.split('_', 1)[1]
-    movie = await db.get_movie_by_imdb(imdb_id)
+    movie = await db.get_movie_by_imdb(imdb_id) # FIXED: Ab yeh sirf zaroori columns return karega.
 
     if not movie:
         await callback.message.edit_text("❌ Yeh movie ab database mein uplabdh nahi hai.")
@@ -181,7 +187,8 @@ async def get_movie_callback(callback: types.CallbackQuery):
     await callback.message.edit_text(f"✅ Aapne chuna: <b>{movie['title']}</b>\n\nFile bheji jaa rahi hai...")
     
     try:
-        await bot.forward_message(chat_id=callback.from_user.id, from_chat_id=movie['channel_id'], message_id=movie['message_id'])
+        # channel_id ko integer mein convert karna zaroori hai
+        await bot.forward_message(chat_id=callback.from_user.id, from_chat_id=int(movie['channel_id']), message_id=movie['message_id']) 
     except Exception as e:
         logger.error(f"Movie forward karne mein error: {e}")
         await callback.message.answer(f"❗️ Movie <b>{movie['title']}</b> ko forward karne mein koi takneeki samasya aa gayi hai.")
@@ -221,7 +228,7 @@ async def admin_help(message: types.Message):
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
     user_count = await db.get_user_count()
-    movie_count = await db.get_movie_count()
+    movie_count = await db.get_movie_count() # FIXED: Ab ye database error nahi dega.
     await message.answer(f"📊 <b>System Health & Stats</b>\n\n"
                          f"👥 <b>Total Users:</b> {user_count:,}\n"
                          f"🎬 <b>Total Movies:</b> {movie_count:,}\n"
@@ -264,11 +271,20 @@ async def add_movie_command(message: types.Message):
         return
     
     try:
-        parts = message.text.replace('/add_movie', '').strip().split('|')
-        imdb_id = parts[0].strip()
-        title = parts[1].strip()
-        year = parts[2].strip() if len(parts) > 2 else None
-    except:
+        # Command text parse karte samay zaroor dhyaan dein
+        full_command = message.text.replace('/add_movie', '', 1).strip()
+        parts = [p.strip() for p in full_command.split('|')]
+        
+        if len(parts) < 2:
+            await message.answer("❌ Format galat hai. Use: `/add_movie imdb_id | title | year`")
+            return
+            
+        imdb_id = parts[0]
+        title = parts[1]
+        year = parts[2] if len(parts) > 2 else None
+        
+    except Exception as e:
+        logger.error(f"Add movie command parse error: {e}")
         await message.answer("❌ Format galat hai. Use: `/add_movie imdb_id | title | year`")
         return
 
