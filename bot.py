@@ -14,7 +14,6 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-# NOTE: Make sure 'database' module is available and up-to-date with async functions
 from database import Database, clean_text_for_search
 
 # --- Step 1: Configuration and Environment Variables ---
@@ -29,8 +28,8 @@ JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# --- NEW FIXES: User Limit and Alternate Bots ---
-CONCURRENT_LIMIT = 35 # Set to 35 as per request
+# --- User Limit and Alternate Bots ---
+CONCURRENT_LIMIT = 35 
 ACTIVE_WINDOW_MINUTES = 5
 ALTERNATE_BOTS = ["Moviemaza92bot", "Moviemaza91bot"]
 
@@ -56,7 +55,6 @@ class AdminFilter(BaseFilter):
 async def keep_db_alive():
     while True:
         try:
-            # DB ko warm up karne ke liye
             await db.get_user_count() 
         except Exception as e:
             logger.error(f"DB warming failed: {e}")
@@ -93,7 +91,6 @@ async def bot_webhook(update: dict):
     await dp.feed_update(bot=bot, update=telegram_update)
     return {"ok": True}
 
-# Ping endpoint (Render keep alive)
 @app.get("/")
 async def ping():
     return {"status": "ok", "service": "Movie Bot is Live"}
@@ -108,8 +105,16 @@ def get_uptime():
     if hours > 0: return f"{hours}h {minutes}m"
     return f"{minutes}m {seconds}s"
 
+async def check_user_membership(user_id: int) -> bool:
+    try:
+        channel_member = await bot.get_chat_member(f"@{JOIN_CHANNEL_USERNAME}", user_id)
+        if channel_member.status not in ['member', 'administrator', 'creator']: return False
+        group_member = await bot.get_chat_member(f"@{USER_GROUP_USERNAME}", user_id)
+        if group_member.status not in ['member', 'administrator', 'creator']: return False
+        return True
+    except: return False
+
 def get_join_keyboard():
-    # Join check ke liye sirf 'Join Both' aur 'I Joined' button
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Channel Join Karein", url=f"https://t.me/{JOIN_CHANNEL_USERNAME}"),
          InlineKeyboardButton(text="👥 Group Join Karein", url=f"https://t.me/{USER_GROUP_USERNAME}")],
@@ -117,7 +122,6 @@ def get_join_keyboard():
     ])
 
 def get_full_limit_keyboard():
-    # Limit full hone par alternate bot buttons
     buttons = [InlineKeyboardButton(text=f"🚀 @{bot_user}", url=f"https://t.me/{bot_user}") for bot_user in ALTERNATE_BOTS]
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
@@ -138,34 +142,27 @@ def extract_movie_info(caption: str):
 
 # --- Step 4: User Limiter Handler (High Priority) ---
 
-@dp.message(F.text) # Har text message par run hoga
+@dp.message(F.text)
 async def user_limiter(message: types.Message):
     user_id = message.from_user.id
     
-    # Admin aur channel posts ko bypass karein
     if user_id == ADMIN_USER_ID or message.chat.type == 'channel':
-        # Admin ke messages add_user mein update ho jayenge
         return 
     
-    # Har message par user activity update karein
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
-    # Limit check karein (Sirf non-command messages par, kyunki command start/help ko allow karna hai)
     if not (message.text.startswith('/')):
         concurrent_users = await db.get_concurrent_user_count(minutes=ACTIVE_WINDOW_MINUTES)
         
         if concurrent_users > CONCURRENT_LIMIT:
-            # Limit full hone par Block Message aur Alternate Bots
             await message.answer(
                 f"⚠️ **Seva (Service) Abhi Vyast Hai**\n\n"
                 f"Humari Free Tier stability policy ke anusaar, bot par **{CONCURRENT_LIMIT} users** ki seema (limit) hai. Abhi yeh seema poori ho chuki hai, isliye aapki request ko roka jaa raha hai.\n\n"
                 f"Aap turant movie search ke liye humare **doosre bots** ka upyog kar sakte hain:"
                 , reply_markup=get_full_limit_keyboard()
             )
-            # Execution yahin rok dein
             return
 
-    # Agar limit theek hai, toh aage ke handlers par execution jaari rakhein
     return 
     
 # --- Step 5: Bot Features (Handlers) ---
@@ -175,14 +172,13 @@ async def start_command(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name
     
-    # Admin Welcome
     if user_id == ADMIN_USER_ID:
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count() 
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         
         admin_message = (
-            f"👑 **Admin Dashboard: @{await bot.get_me()}.username**\n\n"
+            f"👑 **Admin Dashboard: @{await bot.get_me().username}**\n\n"
             f"<b><u>System Status & Stats:</u></b>\n"
             f"- **Active Users:** <pre>{concurrent_users:,}/{CONCURRENT_LIMIT}</pre>\n"
             f"- **Total Users:** <pre>{user_count:,}</pre>\n"
@@ -197,7 +193,6 @@ async def start_command(message: types.Message):
         await message.answer(admin_message)
         return
 
-    # Normal User Welcome & Join Check
     if not await check_user_membership(user_id):
         welcome_text = (
             f"🎬 **Namaskar {first_name}!** Film Khoj (Movie Search) Bot Mein Aapka Swagat Hai.\n\n"
@@ -209,7 +204,7 @@ async def start_command(message: types.Message):
         welcome_text = (
             f"✅ **Shukriya, {first_name}!** Aap Ab Movie Search Ke Liye Taiyar Hain.\n\n"
             f"Bas **movie ya web series ka naam likhein** aur hum aapko file bhejenge.\n\n"
-            f"**💡 Seva Suchna (Service Notice):** Humari Free Tier service mein {CONCURRENT_LIMIT} users ki seema hai. Abhi **{active_users}** users active hain. Agar bot dhima ho toh thodi der baad try karein ya hamare anya bots ka upyog karein."
+            f"<i>💡 **Seva Suchna (Service Notice):** Humari Free Tier service mein {CONCURRENT_LIMIT} users ki seema hai. Abhi **{active_users}** users active hain.</i>"
         )
         await message.answer(welcome_text)
 
@@ -219,13 +214,12 @@ async def check_join_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     first_name = callback.from_user.first_name
     
-    # Check karein ki user ne dono join kiye hain ya nahi
     if await check_user_membership(user_id):
         active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         welcome_text = (
             f"🎉 **Badhai Ho, {first_name}!** Aapne Safaltapoorvak Dono Join Kar Liye Hain.\n\n"
             f"Ab aap movie ya web series ka naam likhkar search shuru kar sakte hain.\n\n"
-            f"**💡 Seema Suchna (Limit Info):** Bot par {CONCURRENT_LIMIT} users ki seema hai. Abhi **{active_users}** users active hain."
+            f"<i>💡 **Seema Suchna (Limit Info):** Bot par {CONCURRENT_LIMIT} users ki seema hai. Abhi **{active_users}** users active hain.</i>"
         )
         await callback.message.edit_text(welcome_text)
     else:
@@ -236,7 +230,6 @@ async def check_join_callback(callback: types.CallbackQuery):
 async def search_movie_handler(message: types.Message):
     user_id = message.from_user.id
     
-    # Join check logic
     if user_id != ADMIN_USER_ID and not await check_user_membership(user_id):
         await message.answer("❌ Kripya search karne se pehle zaroori Channel aur Group join karein aur **'Maine Dono Join Kar Liye'** button dabayein.", reply_markup=get_join_keyboard())
         return
@@ -249,6 +242,7 @@ async def search_movie_handler(message: types.Message):
     searching_msg = await message.answer(f"🔍 **'{original_query}'** ki khoj jaari hai...")
     
     processed_query = clean_text_for_search(original_query)
+    # Search limit 20 hai, aur score threshold 65 hai
     best_results = await db.super_search_movies(processed_query, limit=20) 
 
     if not best_results:
@@ -263,7 +257,6 @@ async def get_movie_callback(callback: types.CallbackQuery):
     await callback.answer("File forward ki jaa rahi hai...")
     imdb_id = callback.data.split('_', 1)[1]
     
-    # Forward karne se pehle user limit check karni zaroori nahi hai, kyunki limiter ne pehle hi check kar liya hai.
     movie = await db.get_movie_by_imdb(imdb_id) 
 
     if not movie:
@@ -273,7 +266,6 @@ async def get_movie_callback(callback: types.CallbackQuery):
     await callback.message.edit_text(f"✅ **{movie['title']}** - File bheji jaa rahi hai. Kripya check karein.")
     
     try:
-        # File forwarding
         await bot.forward_message(chat_id=callback.from_user.id, from_chat_id=int(movie['channel_id']), message_id=movie['message_id']) 
     except Exception as e:
         logger.error(f"Movie forward karne mein error: {e}")
@@ -292,8 +284,6 @@ async def stats_command(message: types.Message):
                          f"🎬 **Total Indexed Movies:** {movie_count:,}\n"
                          f"⚙️ **Status:** Operational ✅\n"
                          f"⏰ **Instance Uptime:** {get_uptime()}")
-
-# (Baki ke Admin Commands, jaise /help, /broadcast, /cleanup_users, /add_movie, aur auto-index yahan same rahenge)
 
 @dp.message(Command("help"), AdminFilter())
 async def admin_help(message: types.Message):
@@ -389,4 +379,3 @@ async def auto_index_handler(message: types.Message):
     )
     if success: logger.info(f"✅ Auto-indexed: {movie_info.get('title')}")
     else: logger.error(f"Auto-index database error for: {movie_info.get('title')}")
-        
