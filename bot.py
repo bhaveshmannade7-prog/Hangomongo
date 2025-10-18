@@ -278,9 +278,8 @@ async def add_movie_command(message: types.Message):
         
     file_id = message.reply_to_message.video.file_id if message.reply_to_message.video else message.reply_to_message.document.file_id
     success = await db.add_movie(
-        imdb_id=imdb_id, title=title, year=year, file_id=file_id, 
-        channel_id=message.reply_to_message.chat.id, 
-        message_id=message.reply_to_message.message_id
+        imdb_id=imdb_id, title=title, year=year,
+        file_id=file_id, channel_id=message.reply_to_message.chat.id, message_id=message.reply_to_message.message_id
     )
     if success: await message.answer(f"✅ Movie '{title}' add ho gayi hai.")
     else: await message.answer("❌ Movie add karne mein error aaya.")
