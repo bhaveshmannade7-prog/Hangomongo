@@ -110,12 +110,15 @@ def extract_movie_info(caption: str):
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    return f"""⚠️ Capacity Reached
+    msg = f"⚠️ Capacity Reached
 
-Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai 
-aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
+"
+    msg += f"Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai "
+    msg += f"aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
 
-Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
+"
+    msg += "Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."
+    return msg
 
 # --- Keep DB alive ---
 async def keep_db_alive():
@@ -158,7 +161,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# FIX: Improved update processing with proper error handling
 async def _process_update(u: Update):
     try:
         await dp.feed_update(bot=bot, update=u)
@@ -209,50 +211,46 @@ async def start_command(message: types.Message):
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-        admin_message = (
-            f"👑 Admin Console: @{bot_info.username}
+        admin_message = f"👑 Admin Console: @{bot_info.username}
 "
-            "Access Level: Full Management
+        admin_message += "Access Level: Full Management
 
 "
-            "System Performance & Metrics
+        admin_message += "System Performance & Metrics
 "
-            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+        admin_message += f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
 "
-            f"• Total Users: {user_count:,}
+        admin_message += f"• Total Users: {user_count:,}
 "
-            f"• Indexed Movies: {movie_count:,}
+        admin_message += f"• Indexed Movies: {movie_count:,}
 "
-            f"• Uptime: {get_uptime()}
+        admin_message += f"• Uptime: {get_uptime()}
 
 "
-            "Management Commands
+        admin_message += "Management Commands
 "
-            "• /stats — Real-time stats
+        admin_message += "• /stats — Real-time stats
 "
-            "• /broadcast — Reply to message to send
+        admin_message += "• /broadcast — Reply to message to send
 "
-            "• /cleanup_users — Deactivate inactive users
+        admin_message += "• /cleanup_users — Deactivate inactive users
 "
-            "• /add_movie — Reply: /add_movie imdb_id | title | year
+        admin_message += "• /add_movie — Reply: /add_movie imdb_id | title | year
 "
-            "• /rebuild_index — Recompute clean titles
+        admin_message += "• /rebuild_index — Recompute clean titles
 "
-            "• /export_csv users|movies [limit]
+        admin_message += "• /export_csv users|movies [limit]
 "
-            "• /set_limit N — Change concurrency cap"
-        )
+        admin_message += "• /set_limit N — Change concurrency cap"
         await message.answer(admin_message)
         return
 
-    welcome_text = (
-        f"🎬 Namaskar {message.from_user.first_name}!
+    welcome_text = f"🎬 Namaskar {message.from_user.first_name}!
 "
-        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
+    welcome_text += "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
 
 "
-        "Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen."
-    )
+    welcome_text += "Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen."
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
 
 @dp.callback_query(F.data == "check_join")
@@ -265,15 +263,13 @@ async def check_join_callback(callback: types.CallbackQuery):
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
             
-        success_text = (
-            f"✅ Verification successful, {callback.from_user.first_name}!
+        success_text = f"✅ Verification successful, {callback.from_user.first_name}!
 
 "
-            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
+        success_text += "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
 
 "
-            f"Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."
-        )
+        success_text += f"Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."
         try:
             await callback.message.edit_text(success_text)
         except TelegramAPIError:
@@ -372,20 +368,19 @@ async def stats_command(message: types.Message):
     user_count = await db.get_user_count()
     movie_count = await db.get_movie_count()
     concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-    await message.answer(
-        "📊 Live System Statistics
+    stats_msg = "📊 Live System Statistics
 
 "
-        f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+    stats_msg += f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
 "
-        f"👥 Total Users: {user_count:,}
+    stats_msg += f"👥 Total Users: {user_count:,}
 "
-        f"🎬 Indexed Movies: {movie_count:,}
+    stats_msg += f"🎬 Indexed Movies: {movie_count:,}
 "
-        "⚙️ Status: Operational
+    stats_msg += "⚙️ Status: Operational
 "
-        f"⏰ Uptime: {get_uptime()}"
-    )
+    stats_msg += f"⏰ Uptime: {get_uptime()}"
+    await message.answer(stats_msg)
 
 @dp.message(Command("broadcast"), AdminFilter())
 async def broadcast_command(message: types.Message):
