@@ -11,8 +11,8 @@ from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-# CRITICAL FIX: Sabhi exceptions ko top-level 'aiogram.exceptions' se import karein.
-from aiogram.exceptions import TelegramAPIError, ChatNotFound, TelegramBadRequest
+# CRITICAL FIX: Base exceptions ko module level par import na karein
+from aiogram.exceptions import TelegramAPIError 
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -131,12 +131,13 @@ async def check_user_membership(user_id: int) -> bool:
             return False
         
         return True
-    except ChatNotFound as e:
+    except TelegramAPIError as e: # Catch all aiogram API errors including ChatNotFound
         # Agar Channel/Group username galat hai (critical for user's ENV check)
-        logger.error(f"MEMBERSHIP CHECK FAILED: ChatNotFound. Check JOIN_CHANNEL_USERNAME/USER_GROUP_USERNAME in ENV. Error: {e}")
+        # Ya phir koi aur Telegram API error (network, permission) hai.
+        logger.error(f"MEMBERSHIP CHECK FAILED (API Error). Check ENV/Bot Permissions. Error: {e}")
         return False 
     except Exception as e: 
-        # Kisi aur Telegram API error ya network issue ke liye
+        # Kisi aur general error ke liye
         logger.error(f"Membership check general failure for user {user_id}: {e}")
         return False
 
@@ -246,7 +247,7 @@ async def check_join_callback(callback: types.CallbackQuery):
             try:
                 # Message edit karne ki koshish karein
                 await callback.message.edit_text(success_text)
-            except (TelegramAPIError, TelegramBadRequest):
+            except TelegramAPIError:
                  # Agar edit fail hota hai (jo ki mobile par aam hai), to naya message bhejein
                 logger.warning(f"Failed to edit message in check_join_callback for user {user_id}. Sending new success message.")
                 await bot.send_message(user_id, success_text)
