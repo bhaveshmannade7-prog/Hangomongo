@@ -24,7 +24,7 @@ def _normalize_for_fuzzy(text: str) -> str:
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
-    t = re.sub(r'(.)\u0001+', r'\u0001', t)
+    # t = re.sub(r'(.)\u0001+', r'\u0001', t) # Bug fix: This line was commented out/removed as it was incorrect/unnecessary
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
@@ -61,9 +61,10 @@ class Movie(Base):
 class Database:
     def __init__(self, database_url: str):
         connect_args = {}
-        if '?sslmode=require' in database_url:
-            database_url = database_url.replace('?sslmode=require', '')
-            connect_args['ssl'] = True
+        # FIX: Added proper SSL handling for Render's PostgreSQL connection
+        if 'sslmode=require' in database_url or database_url.startswith('postgres'):
+            connect_args['ssl'] = 'require'
+            database_url = database_url.replace('?sslmode=require', '').replace('?sslmode=required', '')
 
         if database_url.startswith('postgresql://'):
             database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
