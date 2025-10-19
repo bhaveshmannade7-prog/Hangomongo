@@ -110,7 +110,7 @@ def extract_movie_info(caption: str):
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    # FIX: SyntaxError: unterminated f-string literal fixed by using triple quotes.
+    # FIX 1: Fixed SyntaxError by using triple quotes for multiline f-string.
     msg = f"""⚠️ Capacity Reached
 
 Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai 
@@ -214,7 +214,7 @@ async def start_command(message: types.Message):
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         
-        # FIX: Admin message converted to triple-quoted f-string
+        # FIX 2: Admin message converted to triple-quoted f-string
         admin_message = f"""👑 Admin Console: @{bot_info.username}
 Access Level: Full Management
 
@@ -236,12 +236,13 @@ Management Commands
         await message.answer(admin_message)
         return
 
-    welcome_text = f"🎬 Namaskar {message.from_user.first_name}!
-"
-    welcome_text += "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
+    # FIX 3: Welcome message converted to triple-quoted f-string
+    welcome_text = f"""🎬 Namaskar {message.from_user.first_name}!
 
-"
-    welcome_text += "Hamare Channel aur Group join karne ke baad niche \"I Have Joined Both\" dabayen aur turant access paayen."
+Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
+
+Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen."""
+    
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
 
 @dp.callback_query(F.data == "check_join")
