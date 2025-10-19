@@ -110,7 +110,6 @@ def extract_movie_info(caption: str):
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    # Fixed string literal error from previous attempt
     return f"""⚠️ Capacity Reached
 
 Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai 
@@ -276,8 +275,12 @@ async def search_movie_handler(message: types.Message):
     searching_msg = await message.answer(f"🔍 {original_query} ki khoj jaari hai…")
 
     try:
-        # Fuzzy search logic is now crash-proof
-        top = await db.super_search_movies_advanced(original_query, limit=20)
+        # --- FIX APPLIED: Added a 20-second timeout for the search operation ---
+        top = await asyncio.wait_for(
+            db.super_search_movies_advanced(original_query, limit=20),
+            timeout=20.0
+        )
+        # -----------------------------------------------------------------------
         
         if not top:
             await searching_msg.edit_text(
@@ -291,12 +294,20 @@ async def search_movie_handler(message: types.Message):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
         
+    except asyncio.TimeoutError:
+        # Handle the timeout case specifically, and inform the user
+        logger.warning(f"Search timed out for query: {original_query}")
+        try:
+            await searching_msg.edit_text("⌛️ Search mein samay zyada lag gaya (Database/Server slow). Kripya kuch der baad phir se koshish karein ya alternate bot use karein.")
+        except TelegramAPIError:
+            pass
+            
     except Exception as e:
         logger.error(f"Search error: {e}")
         try:
             await searching_msg.edit_text("❌ Internal error: search system me rukavat aa gayi hai, kuch der baad koshish karein.")
         except TelegramAPIError:
-            await message.answer("❌ Internal error: search system me rukavat aa gayi hai, kuch der baad koshish karein.")
+            pass
 
 
 @dp.callback_query(F.data.startswith("get_"))
