@@ -3,6 +3,8 @@ import os
 import asyncio
 import logging
 import re
+import json # <--- NEW IMPORT
+import io # <--- NEW IMPORT
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Dict
@@ -232,6 +234,7 @@ Management Commands
 • /broadcast — Reply to message to send
 • /cleanup_users — Deactivate inactive users
 • /add_movie — Reply: /add_movie imdb_id | title | year
+• /import_json_movies channel_id — Reply to a JSON file
 • /rebuild_index — Recompute clean titles
 • /export_csv users|movies [limit]
 • /set_limit N — Change concurrency cap"""
@@ -360,7 +363,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
         
     except TelegramAPIError as e:
         logger.error(f"Forward/edit error for {imdb_id}: {e}")
-        await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: {movie['title']} ko forward karne me dikat aayi, kripya phir se try karein.")
+        await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: {movie['title']} ko forward karne me dikat aayi, kripya phir से try karein.")
         
     except Exception as e:
         logger.error(f"Movie callback critical error: {e}")
@@ -459,6 +462,63 @@ async def add_movie_command(message: types.Message):
         await message.answer(f"✅ Movie '{title}' add ho gayi hai.")
     else:
         await message.answer("❌ Movie add karne me error aaya.")
+
+# --- NEW ADMIN COMMAND FOR JSON IMPORT ---
+@dp.message(Command("import_json_movies"), AdminFilter())
+async def import_json_movies_command(message: types.Message):
+    """Admin command to import movie data from a JSON file reply."""
+    if not message.reply_to_message or not message.reply_to_message.document:
+        await message.answer("❌ JSON फ़ाइल को reply करें।\nUsage: /import_json_movies channel_id")
+        return
+
+    args = message.text.split()
+    if len(args) < 2 or not args[1].lstrip('-').isdigit():
+        await message.answer("❌ Channel ID missing ya invalid hai.\nUsage: /import_json_movies -100xxxxxxxxxx")
+        return
+        
+    try:
+        target_channel_id = int(args[1])
+        if target_channel_id > 0: # Ensure it's a negative chat ID for channels
+             await message.answer("❌ Channel ID galat hai, yeh hamesha negative (-100...) hota hai.")
+             return
+    except ValueError:
+        await message.answer("❌ Channel ID number hona chahiye.")
+        return
+
+    # Download the JSON file
+    file_id = message.reply_to_message.document.file_id
+    file_info = await bot.get_file(file_id)
+    file_path = file_info.file_path
+    
+    # Download the file content
+    file_content = io.BytesIO()
+    await bot.download_file(file_path, file_content)
+    file_content.seek(0)
+
+    try:
+        # Load the JSON data
+        movie_list = json.load(file_content)
+        # Validate structure (checking for the minimum required fields)
+        if not isinstance(movie_list, list) or not all('title' in m and 'file_id' in m for m in movie_list):
+            await message.answer("❌ JSON format galat hai. Expected: [{\"title\": \"...\", \"file_id\": \"...\"}, ...]")
+            return
+            
+        await message.answer(f"⏳ {len(movie_list)} entries process ho rahi hain. Kripya intezaar karein.")
+        
+        # Call the new bulk function
+        added_count, skipped_count = await db.bulk_add_new_movies(movie_list, target_channel_id)
+
+        await message.answer(f"""✅ Import Complete!
+• Successfully Added: {added_count}
+• Already Exists (Skipped): {skipped_count}
+• Total Processed: {len(movie_list)}""")
+
+    except json.JSONDecodeError:
+        await message.answer("❌ Uploaded file valid JSON format mein nahi hai.")
+    except Exception as e:
+        logger.error(f"Import JSON failed: {e}")
+        await message.answer(f"❌ Internal error while processing: {type(e).__name__}")
+
 
 @dp.message(Command("rebuild_index"), AdminFilter())
 async def rebuild_index_command(message: types.Message):
