@@ -78,6 +78,8 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
+    # NOTE: Membership check logic missing/stubbed. Assuming it should return True for the bot to function.
+    # If a real check is needed, implement it here using bot.get_chat_member()
     return True
 
 def get_join_keyboard():
@@ -101,25 +103,23 @@ def extract_movie_info(caption: str):
         if len(lines) > 1 and re.search(r"Sd{1,2}", lines[1], re.IGNORECASE):
             title += " " + lines[1].strip()
         info["title"] = title
-    imdb_match = re.search(r"(ttd{7,})", caption)
+    imdb_match = re.search(r"(tt\d{7,})", caption)
     if imdb_match:
         info["imdb_id"] = imdb_match.group(1)
-    year_match = re.search(r"\b(19|20)d{2}\b", caption)
+    year_match = re.search(r"\b(19|20)\d{2}\b", caption)
     if year_match:
         info["year"] = year_match.group(0)
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    return (
-        "⚠️ Capacity Reached
+    # --- FIX APPLIED HERE: Using triple quotes for clean multi-line string ---
+    return f"""⚠️ Capacity Reached
 
-"
-        f"Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai "
-        f"aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
+Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai 
+aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
 
-"
-        "Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."
-    )
+Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
+    # --------------------------------------------------------------------------
 
 # --- Keep DB alive ---
 async def keep_db_alive():
@@ -207,47 +207,28 @@ async def start_command(message: types.Message):
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         admin_message = (
-            f"👑 Admin Console: @{bot_info.username}
-"
-            "Access Level: Full Management
-
-"
-            "System Performance & Metrics
-"
-            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
-"
-            f"• Total Users: {user_count:,}
-"
-            f"• Indexed Movies: {movie_count:,}
-"
-            f"• Uptime: {get_uptime()}
-
-"
-            "Management Commands
-"
-            "• /stats — Real-time stats
-"
-            "• /broadcast — Reply to message to send
-"
-            "• /cleanup_users — Deactivate inactive users
-"
-            "• /add_movie — Reply: /add_movie imdb_id | title | year
-"
-            "• /rebuild_index — Recompute clean titles
-"
-            "• /export_csv users|movies [limit]
-"
+            f"👑 Admin Console: @{bot_info.username}\n"
+            "Access Level: Full Management\n\n"
+            "System Performance & Metrics\n"
+            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}\n"
+            f"• Total Users: {user_count:,}\n"
+            f"• Indexed Movies: {movie_count:,}\n"
+            f"• Uptime: {get_uptime()}\n\n"
+            "Management Commands\n"
+            "• /stats — Real-time stats\n"
+            "• /broadcast — Reply to message to send\n"
+            "• /cleanup_users — Deactivate inactive users\n"
+            "• /add_movie — Reply: /add_movie imdb_id | title | year\n"
+            "• /rebuild_index — Recompute clean titles\n"
+            "• /export_csv users|movies [limit]\n"
             "• /set_limit N — Change concurrency cap"
         )
         await message.answer(admin_message)
         return
 
     welcome_text = (
-        f"🎬 Namaskar {message.from_user.first_name}!
-"
-        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
-
-"
+        f"🎬 Namaskar {message.from_user.first_name}!\n"
+        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).\n\n"
         "Hamare Channel aur Group join karne ke baad niche “I Have Joined Both” dabayen aur turant access paayen."
     )
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
@@ -258,21 +239,19 @@ async def check_join_callback(callback: types.CallbackQuery):
     try:
         active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         if active_users >= CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
+            # Send the overflow message and full limit keyboard separately to ensure it is delivered
             await callback.message.edit_text(overflow_message(active_users))
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
         success_text = (
-            f"✅ Verification successful, {callback.from_user.first_name}!
-
-"
-            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
-
-"
+            f"✅ Verification successful, {callback.from_user.first_name}!\n\n"
+            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.\n\n"
             f"Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."
         )
         try:
             await callback.message.edit_text(success_text)
         except TelegramAPIError:
+            # If the message is unchanged, edit_text raises an error, so send a new one
             await bot.send_message(callback.from_user.id, success_text)
     except Exception as e:
         logger.error(f"check_join error: {e}")
@@ -284,6 +263,8 @@ async def search_movie_handler(message: types.Message):
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
     if not await check_user_membership(user_id):
+        # The check_user_membership function needs to send a message to the user if they fail the check
+        await message.answer("⚠️ Kripya pehle Channel aur Group join karein, phir se /start dabayen.", reply_markup=get_join_keyboard())
         return
 
     if not await ensure_capacity_or_inform(message):
@@ -317,6 +298,13 @@ async def search_movie_handler(message: types.Message):
 async def get_movie_callback(callback: types.CallbackQuery):
     await callback.answer("File forward ki ja rahi hai…")
     imdb_id = callback.data.split("_", 1)[1]
+    
+    # Concurrency check for forwarding
+    if not await ensure_capacity_or_inform(callback.message):
+        # We need to send a new message since callback.message is the inline keyboard message
+        await bot.send_message(callback.from_user.id, overflow_message(await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)), reply_markup=get_full_limit_keyboard())
+        return
+        
     movie = await db.get_movie_by_imdb(imdb_id)
     if not movie:
         await callback.message.edit_text("❌ Yeh movie ab database me uplabdh nahi hai.")
@@ -343,17 +331,11 @@ async def stats_command(message: types.Message):
     movie_count = await db.get_movie_count()
     concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     await message.answer(
-        "📊 Live System Statistics
-
-"
-        f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
-"
-        f"👥 Total Users: {user_count:,}
-"
-        f"🎬 Indexed Movies: {movie_count:,}
-"
-        "⚙️ Status: Operational
-"
+        "📊 Live System Statistics\n\n"
+        f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}\n"
+        f"👥 Total Users: {user_count:,}\n"
+        f"🎬 Indexed Movies: {movie_count:,}\n"
+        "⚙️ Status: Operational\n"
         f"⏰ Uptime: {get_uptime()}"
     )
 
@@ -373,22 +355,16 @@ async def broadcast_command(message: types.Message):
         except Exception:
             failed += 1
         if (success + failed) % 100 == 0 and (success + failed) > 0:
-            await progress_msg.edit_text(f"📤 Broadcasting…
-✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}")
+            await progress_msg.edit_text(f"📤 Broadcasting…\n✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}")
         await asyncio.sleep(0.05)
-    await progress_msg.edit_text(f"✅ Broadcast Complete!
-
-• Success: {success}
-• Failed: {failed}")
+    await progress_msg.edit_text(f"✅ Broadcast Complete!\n\n• Success: {success}\n• Failed: {failed}")
 
 @dp.message(Command("cleanup_users"), AdminFilter())
 async def cleanup_users_command(message: types.Message):
     await message.answer("🧹 Inactive users ko clean kiya ja raha hai…")
     removed_count = await db.cleanup_inactive_users(days=30)
     new_count = await db.get_user_count()
-    await message.answer(f"✅ Cleanup complete!
-• Deactivated: {removed_count}
-• Active Users now: {new_count}")
+    await message.answer(f"✅ Cleanup complete!\n• Deactivated: {removed_count}\n• Active Users now: {new_count}")
 
 @dp.message(Command("add_movie"), AdminFilter())
 async def add_movie_command(message: types.Message):
@@ -436,20 +412,16 @@ async def export_csv_command(message: types.Message):
     limit = int(args[2]) if len(args) > 2 and args[2].isdigit() else 2000
     if kind == "users":
         rows = await db.export_users(limit=limit)
-        header = "user_id,username,first_name,last_name,joined_date,last_active,is_active
-"
-        csv = header + "
-".join([
+        header = "user_id,username,first_name,last_name,joined_date,last_active,is_active\n"
+        csv = header + "\n".join([
             f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
             for r in rows
         ])
         await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="users.csv"), caption="Users export")
     else:
         rows = await db.export_movies(limit=limit)
-        header = "imdb_id,title,year,channel_id,message_id,added_date
-"
-        csv = header + "
-".join([
+        header = "imdb_id,title,year,channel_id,message_id,added_date\n"
+        csv = header + "\n".join([
             f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
             for r in rows
         ])
@@ -478,11 +450,15 @@ async def auto_index_handler(message: types.Message):
     if not movie_info:
         logger.warning(f"Auto-index skipped: could not parse caption: {caption[:80]}")
         return
+    
     file_id = message.video.file_id if message.video else message.document.file_id
     imdb_id = movie_info.get("imdb_id", f"auto_{message.message_id}")
+    
+    # Check if movie already exists
     if await db.get_movie_by_imdb(imdb_id):
         logger.info(f"Movie already indexed: {movie_info.get('title')}")
         return
+        
     success = await db.add_movie(
         imdb_id=imdb_id,
         title=movie_info.get("title"),
