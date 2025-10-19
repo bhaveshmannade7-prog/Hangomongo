@@ -395,14 +395,16 @@ async def broadcast_command(message: types.Message):
             except Exception:
                 failed += 1
             if (success + failed) % 100 == 0 and (success + failed) > 0:
-                await progress_msg.edit_text(f"📤 Broadcasting…
-✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}")
+                # FIXED: SyntaxError 6 (The one in the error log)
+                await progress_msg.edit_text(f"""📤 Broadcasting…
+✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}""")
             await asyncio.sleep(0.05) 
             
-        await progress_msg.edit_text(f"✅ Broadcast Complete!
+        # FIXED: SyntaxError 7 (The final broadcast message, also multiline)
+        await progress_msg.edit_text(f"""✅ Broadcast Complete!
 
 • Success: {success}
-• Failed: {failed}")
+• Failed: {failed}""")
         
     except Exception as e:
         logger.error(f"Broadcast failed: {e}")
