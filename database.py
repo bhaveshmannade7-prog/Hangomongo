@@ -183,7 +183,7 @@ class Database:
     async def get_user_count(self):
         async with self.SessionLocal() as session:
             try:
-                result = await session.execute(select(func.count(User.user_id)))
+                result = await session.execute(select(func.count(User.id)))
                 return result.scalar_one()
             except Exception as e:
                 logger.error(f"get_user_count error: {e}")
@@ -326,26 +326,36 @@ class Database:
         async with self.SessionLocal() as session:
             try:
                 q_clean = clean_text_for_search(query)
-
-                # Database Query (Fast I/O Operation)
-                ilike_patterns = [
-                    '%' + '%'.join(q_clean.split()) + '%',
-                    f"%{q_clean}%",
-                    f"%{_normalize_for_fuzzy(query)}%",
-                    # Consonant chunks logic is kept simple here
+                q_norm = _normalize_for_fuzzy(query)
+                
+                # --- Optimized DB Query Filters ---
+                db_filters = [
+                    # 1. Exact clean title match (fastest)
+                    Movie.clean_title == q_clean,
+                    # 2. Starts with clean query (index-friendly if database supports it)
+                    Movie.clean_title.ilike(f"{q_clean}%"),
+                    # 3. Full match on the clean query (only for a single phrase)
+                    Movie.clean_title.ilike(f"%{q_clean}%"),
                 ]
-                filt = or_(*[Movie.clean_title.ilike(p) for p in ilike_patterns])
 
-                # Fetch a larger list of candidates (up to 300) to feed into the fuzzy matcher
+                # If query has multiple words, try matching them separated by wildcards (less aggressive than before)
+                if len(q_clean.split()) > 1:
+                    db_filters.append(
+                        Movie.clean_title.ilike('%' + '%'.join(q_clean.split()) + '%')
+                    )
+
+                # Combine filters using OR
+                filt = or_(*db_filters)
+                
+                # Fetch maximum 100 candidates from the database
                 res = await session.execute(
-                    select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(300)
+                    select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(100)
                 )
                 candidates = res.all()
                 if not candidates:
                     return []
                 
-                # CPU-Bound Fuzzy Matching (Moved to a separate thread)
-                # We are passing the candidates and the original query for processing
+                # CPU-Bound Fuzzy Matching (Still offloaded to a separate thread)
                 final_results = await asyncio.to_thread(
                     _process_fuzzy_candidates, 
                     candidates, 
