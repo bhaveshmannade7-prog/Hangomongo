@@ -4,7 +4,6 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 
-# Added 'text' import for manual migration logic
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_scoped_session
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_, text 
@@ -357,4 +356,3 @@ class Database:
             return []
         finally:
             await session.close()
-        
