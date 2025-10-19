@@ -4,27 +4,31 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 
+# Added 'text' import for manual migration logic
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_scoped_session
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_
+from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_, text 
 
-from thefuzz import fuzz  # python-Levenshtein accelerates if installed
+from thefuzz import fuzz
 
 logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 def clean_text_for_search(text: str) -> str:
     text = text.lower()
-    text = re.sub(r'\b(s|season|seson|sisan)s*(d{1,2})\b', r's\u0002', text)
-    text = re.sub(r'complete season', '', text)
-    text = re.sub(r'[W_]+', ' ', text)
+    # Failsafe: Replace non-alphanumeric characters (except space) with a single space
+    text = re.sub(r'[^a-z0-9\s]+', ' ', text)
+    # Condense multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    # Remove common season/episode notation that can interfere with movie search
+    text = re.sub(r'\b(s|season)\s*\d{1,2}\b', '', text) 
     return text.strip()
 
 def _normalize_for_fuzzy(text: str) -> str:
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
-    t = re.sub(r'(.)\u0001+', r'\u0001', t)
+    t = re.sub(r'(.)\1+', r'\1', t)
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
@@ -80,6 +84,32 @@ class Database:
     async def init_db(self):
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            
+            # --- FIX: Manual Migration Logic ---
+            if self.engine.dialect.name == 'postgresql':
+                try:
+                    # Try to select from the new column to check if it exists
+                    await conn.execute(text("SELECT clean_title FROM movies LIMIT 1"))
+                except Exception as e:
+                    # This exception is raised if the column does not exist
+                    if 'clean_title does not exist' in str(e):
+                        logger.warning("Applying manual migration: Adding 'clean_title' column to 'movies'.")
+                        # Add column with a NOT NULL constraint and a temporary default
+                        await conn.execute(text("ALTER TABLE movies ADD COLUMN clean_title VARCHAR"))
+                        # Populate the column immediately after adding it
+                        await conn.execute(text("UPDATE movies SET clean_title = lower(regexp_replace(title, '[^a-z0-9\\s]+', ' ', 'g'))"))
+                        # Set NOT NULL constraint after populating
+                        await conn.execute(text("ALTER TABLE movies ALTER COLUMN clean_title SET NOT NULL"))
+                        # Create index on the new column
+                        await conn.execute(text("CREATE INDEX ix_movies_clean_title ON movies (clean_title)"))
+
+                        await conn.commit()
+                        logger.info("Manual migration completed and clean_title initialized. Restarting bot is recommended.")
+                    else:
+                        # Reraise if it's a different critical error
+                        raise e 
+            # ---------------------------------
+            
         logger.info("Database tables checked/created successfully.")
 
     def get_session(self) -> AsyncSession:
@@ -144,6 +174,7 @@ class Database:
     async def add_movie(self, imdb_id, title, year, file_id, message_id, channel_id):
         session = self.get_session()
         try:
+            # clean_title is guaranteed to be present now
             clean_title = clean_text_for_search(title)
             new_movie = Movie(
                 imdb_id=imdb_id, title=title, clean_title=clean_title, year=year,
@@ -240,6 +271,7 @@ class Database:
             batch = 1000
             offset = 0
             while True:
+                # This SELECT statement needs all columns, including the new clean_title
                 res = await session.execute(select(Movie).limit(batch).offset(offset))
                 rows = res.scalars().all()
                 if not rows:
@@ -252,6 +284,11 @@ class Database:
                 await session.commit()
                 offset += batch
             return updated, total
+        except Exception as e:
+            logger.error(f"Rebuild index failed: {e}")
+            await session.rollback()
+            # Failsafe: return 0, 0 on failure
+            return 0, total 
         finally:
             await session.close()
 
@@ -265,15 +302,20 @@ class Database:
 
             tokens = q_clean.split()
             ilike_patterns = [
+                # Full token match (most precise)
                 '%' + '%'.join(tokens) + '%' if tokens else '%',
+                # Clean query match
                 f"%{q_clean}%",
+                # Normalized query match
                 f"%{q_norm}%",
             ]
 
             cons_chunks = [q_cons[i:i+2] for i in range(0, len(q_cons), 2)] if q_cons else []
             if cons_chunks:
+                # Consonant signature chunk match
                 ilike_patterns.append('%' + '%'.join(cons_chunks) + '%')
 
+            # Use OR condition for broader search
             filt = or_(*[Movie.clean_title.ilike(p) for p in ilike_patterns])
 
             res = await session.execute(
@@ -285,20 +327,27 @@ class Database:
 
             results = []
             for imdb_id, title, clean_title in candidates:
+                # Scoring based on different matching techniques
                 s1 = fuzz.WRatio(clean_title, q_clean)
                 s2 = fuzz.token_set_ratio(title, query)
                 s3 = fuzz.partial_ratio(clean_title, q_clean)
                 s4 = fuzz.ratio(_consonant_signature(title), q_cons)
                 score = max(s1, s2, s3, s4)
+                
+                # Boost score if all query tokens are present in the title
                 if all(t in clean_title for t in tokens if t):
                     score = min(100, score + 5)
+                
                 results.append((score, imdb_id, title))
 
+            # Sort by score (descending) then title (ascending)
             results.sort(key=lambda x: (-x[0], x[2]))
+            
+            # Filter results with a decent match score (>= 55)
             final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 55][:limit]
             return final
         except Exception as e:
-            logger.error(f"Advanced search error: {e}")
+            logger.error(f"Advanced search failed: {e}")
             return []
         finally:
             await session.close()
