@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import List, Dict, Any
+from typing import List, Dict
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
@@ -31,10 +31,9 @@ JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Prefer full external URL on Render
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g. https://your-service.onrender.com
-PUBLIC_URL = os.getenv("PUBLIC_URL")  # optional manual fallback (https://your-domain)
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # optional secret header
+PUBLIC_URL = os.getenv("PUBLIC_URL")                    # optional fallback
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 DEFAULT_CONCURRENT_LIMIT = int(os.getenv("CONCURRENT_LIMIT", "35"))
 ACTIVE_WINDOW_MINUTES = int(os.getenv("ACTIVE_WINDOW_MINUTES", "5"))
@@ -53,7 +52,7 @@ def build_webhook_url() -> str:
     elif PUBLIC_URL:
         base = PUBLIC_URL.rstrip("/")
     else:
-        logger.warning("No external URL found; set RENDER_EXTERNAL_URL or PUBLIC_URL for webhook to work.")
+        logger.warning("No external URL found; set RENDER_EXTERNAL_URL or PUBLIC_URL.")
         base = ""
     return f"{base}/bot/{BOT_TOKEN}" if base else ""
 
@@ -111,11 +110,14 @@ def extract_movie_info(caption: str):
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    return f"""⚠️ Capacity Reached
-
-Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai aur abhi {active_users} active hain, isliye nayi requests temporarily hold par hain [try again soon].
-
-Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
+    return "
+".join([
+        "⚠️ Capacity Reached",
+        "",
+        f"Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai aur abhi {active_users} active hain; nayi requests temporarily hold par hain.",
+        "",
+        "Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."
+    ])
 
 # --- Keep DB alive ---
 async def keep_db_alive():
@@ -146,7 +148,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Webhook setup error: {e}")
     else:
-        logger.warning("WEBHOOK_URL is empty; bot cannot receive updates until a public URL is set.")
+        logger.warning("WEBHOOK_URL is empty; public URL required.")
 
     yield
 
@@ -202,30 +204,36 @@ async def start_command(message: types.Message):
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-        admin_message = f"""👑 Admin Console: @{bot_info.username}
-Access Level: Full Management
-
-System Performance & Metrics
-• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
-• Total Users: {user_count:,}
-• Indexed Movies: {movie_count:,}
-• Uptime: {get_uptime()}
-
-Management Commands
-• /stats — Real-time stats
-• /broadcast — Reply to message to send
-• /cleanup_users — Deactivate inactive users
-• /add_movie — Reply: /add_movie imdb_id | title | year
-• /rebuild_index — Recompute clean titles
-• /export_csv users|movies [limit]
-• /set_limit N — Change concurrency cap"""
+        admin_message = "
+".join([
+            f"👑 Admin Console: @{bot_info.username}",
+            "Access Level: Full Management",
+            "",
+            "System Performance & Metrics",
+            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}",
+            f"• Total Users: {user_count:,}",
+            f"• Indexed Movies: {movie_count:,}",
+            f"• Uptime: {get_uptime()}",
+            "",
+            "Management Commands",
+            "• /stats — Real-time stats",
+            "• /broadcast — Reply to message to send",
+            "• /cleanup_users — Deactivate inactive users",
+            "• /add_movie — Reply: /add_movie imdb_id | title | year",
+            "• /rebuild_index — Recompute clean titles",
+            "• /export_csv users|movies [limit]",
+            "• /set_limit N — Change concurrency cap",
+        ])
         await message.answer(admin_message)
         return
 
-    welcome_text = f"""🎬 Namaskar {message.from_user.first_name}!
-Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
-
-Hamare Channel aur Group join karne ke baad niche “I Have Joined Both” dabayen aur turant access paayen."""
+    welcome_text = "
+".join([
+        f"🎬 Namaskar {message.from_user.first_name}!",
+        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).",
+        "",
+        "Hamare Channel aur Group join karne ke baad niche “I Have Joined Both” dabayen aur turant access paayen."
+    ])
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
 
 @dp.callback_query(F.data == "check_join")
@@ -237,11 +245,14 @@ async def check_join_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(overflow_message(active_users))
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
-        success_text = f"""✅ Verification successful, {callback.from_user.first_name}!
-
-Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
-
-Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."""
+        success_text = "
+".join([
+            f"✅ Verification successful, {callback.from_user.first_name}!",
+            "",
+            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.",
+            "",
+            f"Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."
+        ])
         try:
             await callback.message.edit_text(success_text)
         except TelegramAPIError:
@@ -313,18 +324,16 @@ async def stats_command(message: types.Message):
     movie_count = await db.get_movie_count()
     concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     await message.answer(
-        "📊 Live System Statistics
-
-"
-        f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
-"
-        f"👥 Total Users: {user_count:,}
-"
-        f"🎬 Indexed Movies: {movie_count:,}
-"
-        f"⚙️ Status: Operational
-"
-        f"⏰ Uptime: {get_uptime()}"
+        "
+".join([
+            "📊 Live System Statistics",
+            "",
+            f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}",
+            f"👥 Total Users: {user_count:,}",
+            f"🎬 Indexed Movies: {movie_count:,}",
+            "⚙️ Status: Operational",
+            f"⏰ Uptime: {get_uptime()}",
+        ])
     )
 
 @dp.message(Command("broadcast"), AdminFilter())
