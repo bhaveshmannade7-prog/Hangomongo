@@ -11,10 +11,8 @@ from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-# CRITICAL FIX: Exceptions ko specific modules se import kiya gaya hai (aiogram v3+ compatibility)
-from aiogram.exceptions import TelegramAPIError 
-from aiogram.exceptions.base import TelegramBadRequest
-from aiogram.exceptions.other import ChatNotFound 
+# CRITICAL FIX: Sabhi exceptions ko top-level 'aiogram.exceptions' se import karein.
+from aiogram.exceptions import TelegramAPIError, ChatNotFound, TelegramBadRequest
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -397,7 +395,7 @@ async def cleanup_users_command(message: types.Message):
 @dp.message(Command("add_movie"), AdminFilter())
 async def add_movie_command(message: types.Message):
     if not message.reply_to_message or not (message.reply_to_message.video or message.reply_to_message.document):
-        await message.answer("❌ Movie file ko reply karke command likhein: `/add_movie imdb_id | title | year`")
+        await message.answer("❌ Movie file ko reply k करके command likhein: `/add_movie imdb_id | title | year`")
         return
     
     try:
