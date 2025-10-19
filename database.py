@@ -2,14 +2,13 @@ import logging
 import re
 import asyncio
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_scoped_session
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_
 
-from thefuzz import process, fuzz  # Levenshtein-based scorers
-# python-Levenshtein speeds up thefuzz automatically if installed
+from thefuzz import process, fuzz  # uses python-Levenshtein if installed
 
 logger = logging.getLogger(__name__)
 Base = declarative_base()
@@ -22,22 +21,18 @@ def clean_text_for_search(text: str) -> str:
     text = re.sub(r'[W_]+', ' ', text)
     return text.strip()
 
-def normalize_for_fuzzy(text: str) -> str:
-    # aggressive normalization to survive misspellings like katara/katra/krta for "kantara"
+def _normalize_for_fuzzy(text: str) -> str:
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
-    # reduce double letters
-    t = re.sub(r'(.)\u0001+', r'\u0001', t)
-    # phonetic-ish simplifications
+    t = re.sub(r'(.)\u0001+', r'\u0001', t)  # reduce double letters
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
     return t
 
-def consonant_signature(text: str) -> str:
-    # drop vowels to match noisy romanized spellings
-    t = normalize_for_fuzzy(text)
+def _consonant_signature(text: str) -> str:
+    t = _normalize_for_fuzzy(text)
     t = re.sub(r'[aeiou]', '', t)
     t = re.sub(r's+', '', t)
     return t
@@ -80,17 +75,16 @@ class Database:
 
         self.engine = create_async_engine(database_url, echo=False, connect_args=connect_args)
 
-        # Task-based session scope to avoid cross-task reuse
         self.SessionLocal = async_scoped_session(
             sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession),
             scopefunc=asyncio.current_task,
         )
-        logger.info("✅ Database engine initialized for async operations.")
+        logger.info("Database engine initialized for async operations.")
 
     async def init_db(self):
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("✅ Database tables checked/created successfully.")
+        logger.info("Database tables checked/created successfully.")
 
     def get_session(self) -> AsyncSession:
         return self.SessionLocal()
@@ -240,12 +234,11 @@ class Database:
         finally:
             await session.close()
 
-    async def rebuild_clean_titles(self) -> (int, int):
+    async def rebuild_clean_titles(self) -> Tuple[int, int]:
         session = self.get_session()
         updated = 0
         total = 0
         try:
-            # estimate total
             result = await session.execute(select(func.count(Movie.id)))
             total = result.scalar_one()
             batch = 1000
@@ -269,16 +262,14 @@ class Database:
     # --- Fuzzy search (improved) ---
     async def super_search_movies_advanced(self, query: str, limit: int = 20) -> List[Dict]:
         """
-        Pulls a generous candidate set using multiple ILIKE patterns, then ranks with multiple fuzzy scorers
-        including WRatio, token_set_ratio, partial_ratio, and a consonant-signature ratio to survive heavy misspellings.
+        Wide candidate ILIKE pull + multi-scorer ranking (WRatio, token_set_ratio, partial_ratio, consonant signature).
         """
         session = self.get_session()
         try:
             q_clean = clean_text_for_search(query)
-            q_norm = normalize_for_fuzzy(query)
-            q_cons = consonant_signature(query)
+            q_norm = _normalize_for_fuzzy(query)
+            q_cons = _consonant_signature(query)
 
-            # Build several broad patterns for candidate pull
             tokens = q_clean.split()
             ilike_patterns = [
                 '%' + '%'.join(tokens) + '%' if tokens else '%',
@@ -286,7 +277,6 @@ class Database:
                 f"%{q_norm}%",
             ]
 
-            # Consonant signature pattern (loose) — split into bigrams for robustness
             cons = q_cons
             cons_chunks = [cons[i:i+2] for i in range(0, len(cons), 2)] if cons else []
             if cons_chunks:
@@ -294,7 +284,6 @@ class Database:
 
             filt = or_(*[Movie.clean_title.ilike(p) for p in ilike_patterns])
 
-            # fetch generous candidate set
             res = await session.execute(
                 select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(300)
             )
@@ -302,22 +291,17 @@ class Database:
             if not candidates:
                 return []
 
-            # rank candidates with multiple scorers
             results = []
             for imdb_id, title, clean_title in candidates:
-                s1 = fuzz.WRatio(clean_title, q_clean)  # overall robust scorer
-                s2 = fuzz.token_set_ratio(title, query)  # rearranged tokens strong
-                s3 = fuzz.partial_ratio(clean_title, q_clean)  # substring tolerance
-                s4 = fuzz.ratio(consonant_signature(title), q_cons)  # vowel-insensitive
+                s1 = fuzz.WRatio(clean_title, q_clean)
+                s2 = fuzz.token_set_ratio(title, query)
+                s3 = fuzz.partial_ratio(clean_title, q_clean)
+                s4 = fuzz.ratio(_consonant_signature(title), q_cons)
                 score = max(s1, s2, s3, s4)
-
-                # small bonuses if all query tokens appear
                 if all(t in clean_title for t in tokens if t):
                     score = min(100, score + 5)
-
                 results.append((score, imdb_id, title))
 
-            # sort and cut
             results.sort(key=lambda x: (-x[0], x[2]))
             final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 55][:limit]
             return final
