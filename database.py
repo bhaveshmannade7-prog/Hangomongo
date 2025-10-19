@@ -8,12 +8,11 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_scop
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_
 
-from thefuzz import process, fuzz  # uses python-Levenshtein if installed
+from thefuzz import fuzz  # python-Levenshtein speeds it up if installed
 
 logger = logging.getLogger(__name__)
 Base = declarative_base()
 
-# --- Text normalization helpers ---
 def clean_text_for_search(text: str) -> str:
     text = text.lower()
     text = re.sub(r'\b(s|season|seson|sisan)s*(d{1,2})\b', r's\u0002', text)
@@ -25,7 +24,7 @@ def _normalize_for_fuzzy(text: str) -> str:
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
-    t = re.sub(r'(.)\u0001+', r'\u0001', t)  # reduce double letters
+    t = re.sub(r'(.)\u0001+', r'\u0001', t)
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
@@ -37,7 +36,6 @@ def _consonant_signature(text: str) -> str:
     t = re.sub(r's+', '', t)
     return t
 
-# --- Models ---
 class User(Base):
     __tablename__ = 'users'
     user_id = Column(BigInteger, primary_key=True)
@@ -60,7 +58,6 @@ class Movie(Base):
     message_id = Column(BigInteger, nullable=False)
     added_date = Column(DateTime, default=datetime.utcnow)
 
-# --- DB wrapper ---
 class Database:
     def __init__(self, database_url: str):
         connect_args = {}
@@ -74,7 +71,6 @@ class Database:
             database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
 
         self.engine = create_async_engine(database_url, echo=False, connect_args=connect_args)
-
         self.SessionLocal = async_scoped_session(
             sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession),
             scopefunc=asyncio.current_task,
@@ -89,7 +85,7 @@ class Database:
     def get_session(self) -> AsyncSession:
         return self.SessionLocal()
 
-    # --- Users ---
+    # Users
     async def add_user(self, user_id, username, first_name, last_name):
         session = self.get_session()
         try:
@@ -144,30 +140,7 @@ class Database:
         finally:
             await session.close()
 
-    async def export_users(self, limit: int = 2000) -> List[Dict]:
-        session = self.get_session()
-        try:
-            result = await session.execute(
-                select(User.user_id, User.username, User.first_name, User.last_name, User.joined_date, User.last_active, User.is_active)
-                .limit(limit)
-            )
-            rows = result.all()
-            return [
-                dict(
-                    user_id=r[0],
-                    username=r[1],
-                    first_name=r[2],
-                    last_name=r[3],
-                    joined_date=r[4],
-                    last_active=r[5],
-                    is_active=r[6],
-                )
-                for r in rows
-            ]
-        finally:
-            await session.close()
-
-    # --- Movies ---
+    # Movies
     async def add_movie(self, imdb_id, title, year, file_id, message_id, channel_id):
         session = self.get_session()
         try:
@@ -209,6 +182,29 @@ class Database:
                     'message_id': movie.message_id,
                 }
             return None
+        finally:
+            await session.close()
+
+    async def export_users(self, limit: int = 2000) -> List[Dict]:
+        session = self.get_session()
+        try:
+            result = await session.execute(
+                select(User.user_id, User.username, User.first_name, User.last_name, User.joined_date, User.last_active, User.is_active)
+                .limit(limit)
+            )
+            rows = result.all()
+            return [
+                dict(
+                    user_id=r[0],
+                    username=r[1],
+                    first_name=r[2],
+                    last_name=r[3],
+                    joined_date=r[4],
+                    last_active=r[5],
+                    is_active=r[6],
+                )
+                for r in rows
+            ]
         finally:
             await session.close()
 
@@ -259,11 +255,8 @@ class Database:
         finally:
             await session.close()
 
-    # --- Fuzzy search (improved) ---
+    # Fuzzy search (improved)
     async def super_search_movies_advanced(self, query: str, limit: int = 20) -> List[Dict]:
-        """
-        Wide candidate ILIKE pull + multi-scorer ranking (WRatio, token_set_ratio, partial_ratio, consonant signature).
-        """
         session = self.get_session()
         try:
             q_clean = clean_text_for_search(query)
@@ -277,8 +270,7 @@ class Database:
                 f"%{q_norm}%",
             ]
 
-            cons = q_cons
-            cons_chunks = [cons[i:i+2] for i in range(0, len(cons), 2)] if cons else []
+            cons_chunks = [q_cons[i:i+2] for i in range(0, len(q_cons), 2)] if q_cons else []
             if cons_chunks:
                 ilike_patterns.append('%' + '%'.join(cons_chunks) + '%')
 
