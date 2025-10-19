@@ -83,32 +83,41 @@ class Database:
 
     async def init_db(self):
         async with self.engine.begin() as conn:
+            # 1. Ensure tables exist (Base.metadata.create_all handles initial creation)
             await conn.run_sync(Base.metadata.create_all)
             
-            # --- FIX: Manual Migration Logic ---
+            # 2. FIX: Crash-proof Manual Migration Check for 'clean_title' column
             if self.engine.dialect.name == 'postgresql':
-                try:
-                    # Try to select from the new column to check if it exists
-                    await conn.execute(text("SELECT clean_title FROM movies LIMIT 1"))
-                except Exception as e:
-                    # This exception is raised if the column does not exist
-                    if 'clean_title does not exist' in str(e):
-                        logger.warning("Applying manual migration: Adding 'clean_title' column to 'movies'.")
-                        # Add column with a NOT NULL constraint and a temporary default
-                        await conn.execute(text("ALTER TABLE movies ADD COLUMN clean_title VARCHAR"))
-                        # Populate the column immediately after adding it
-                        await conn.execute(text("UPDATE movies SET clean_title = lower(regexp_replace(title, '[^a-z0-9\\s]+', ' ', 'g'))"))
-                        # Set NOT NULL constraint after populating
-                        await conn.execute(text("ALTER TABLE movies ALTER COLUMN clean_title SET NOT NULL"))
-                        # Create index on the new column
-                        await conn.execute(text("CREATE INDEX ix_movies_clean_title ON movies (clean_title)"))
+                
+                # Check PostgreSQL information schema to see if the column exists
+                check_query = text(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns 
+                    WHERE table_name='movies' AND column_name='clean_title';
+                    """
+                )
+                
+                result = await conn.execute(check_query)
+                column_exists = result.scalar_one_or_none()
+                
+                if not column_exists:
+                    logger.warning("Applying manual migration: Adding 'clean_title' column to 'movies'.")
+                    
+                    # Add column
+                    await conn.execute(text("ALTER TABLE movies ADD COLUMN clean_title VARCHAR"))
+                    
+                    # Populate the column
+                    await conn.execute(text("UPDATE movies SET clean_title = lower(regexp_replace(title, '[^a-z0-9\\s]+', ' ', 'g'))"))
+                    
+                    # Set NOT NULL constraint
+                    await conn.execute(text("ALTER TABLE movies ALTER COLUMN clean_title SET NOT NULL"))
+                    
+                    # Create index on the new column (optional, but good for search speed)
+                    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movies_clean_title ON movies (clean_title)"))
 
-                        await conn.commit()
-                        logger.info("Manual migration completed and clean_title initialized. Restarting bot is recommended.")
-                    else:
-                        # Reraise if it's a different critical error
-                        raise e 
-            # ---------------------------------
+                    await conn.commit()
+                    logger.info("Manual migration completed and clean_title initialized.")
             
         logger.info("Database tables checked/created successfully.")
 
@@ -174,7 +183,6 @@ class Database:
     async def add_movie(self, imdb_id, title, year, file_id, message_id, channel_id):
         session = self.get_session()
         try:
-            # clean_title is guaranteed to be present now
             clean_title = clean_text_for_search(title)
             new_movie = Movie(
                 imdb_id=imdb_id, title=title, clean_title=clean_title, year=year,
@@ -271,7 +279,6 @@ class Database:
             batch = 1000
             offset = 0
             while True:
-                # This SELECT statement needs all columns, including the new clean_title
                 res = await session.execute(select(Movie).limit(batch).offset(offset))
                 rows = res.scalars().all()
                 if not rows:
@@ -287,7 +294,6 @@ class Database:
         except Exception as e:
             logger.error(f"Rebuild index failed: {e}")
             await session.rollback()
-            # Failsafe: return 0, 0 on failure
             return 0, total 
         finally:
             await session.close()
@@ -351,3 +357,4 @@ class Database:
             return []
         finally:
             await session.close()
+        
