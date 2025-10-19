@@ -78,6 +78,8 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
+    # NOTE: This function currently always returns True.
+    # In a real bot, you'd add logic here to check if the user is a member of required channels/groups.
     return True 
 
 def get_join_keyboard():
@@ -416,7 +418,7 @@ async def cleanup_users_command(message: types.Message):
     removed_count = await db.cleanup_inactive_users(days=30)
     new_count = await db.get_user_count()
     
-    # NEW FIX: SyntaxError 8 (Current Error)
+    # FIXED: SyntaxError 8 (Current Error was here)
     await message.answer(f"""✅ Cleanup complete!
 • Deactivated: {removed_count}
 • Active Users now: {new_count}""")
@@ -468,8 +470,9 @@ async def export_csv_command(message: types.Message):
     try:
         if kind == "users":
             rows = await db.export_users(limit=limit)
-            header = "user_id,username,first_name,last_name,joined_date,last_active,is_active
-"
+            # FIX: Changed to triple quotes to handle newlines correctly
+            header = """user_id,username,first_name,last_name,joined_date,last_active,is_active
+"""
             csv = header + "\n".join([
                 f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
                 for r in rows
@@ -477,8 +480,9 @@ async def export_csv_command(message: types.Message):
             await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="users.csv"), caption="Users export")
         else:
             rows = await db.export_movies(limit=limit)
-            header = "imdb_id,title,year,channel_id,message_id,added_date
-"
+            # FIX: Changed to triple quotes to handle newlines correctly
+            header = """imdb_id,title,year,channel_id,message_id,added_date
+"""
             csv = header + "\n".join([
                 f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
                 for r in rows
