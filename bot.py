@@ -256,7 +256,7 @@ async def check_join_callback(callback: types.CallbackQuery):
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
             
-        # FIXED: SyntaxError 4 (This was the newest error in your log)
+        # FIXED: SyntaxError 4
         success_text = f"""✅ Verification successful, {callback.from_user.first_name}!
 
 Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
@@ -364,18 +364,16 @@ async def stats_command(message: types.Message):
     user_count = await db.get_user_count()
     movie_count = await db.get_movie_count()
     concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-    stats_msg = "📊 Live System Statistics
+    
+    # FIXED: SyntaxError 5
+    stats_msg = f"""📊 Live System Statistics
 
-"
-    stats_msg += f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
-"
-    stats_msg += f"👥 Total Users: {user_count:,}
-"
-    stats_msg += f"🎬 Indexed Movies: {movie_count:,}
-"
-    stats_msg += "⚙️ Status: Operational
-"
-    stats_msg += f"⏰ Uptime: {get_uptime()}"
+🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+👥 Total Users: {user_count:,}
+🎬 Indexed Movies: {movie_count:,}
+⚙️ Status: Operational
+⏰ Uptime: {get_uptime()}"""
+    
     await message.answer(stats_msg)
 
 @dp.message(Command("broadcast"), AdminFilter())
