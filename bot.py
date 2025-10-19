@@ -21,6 +21,7 @@ from database import Database, clean_text_for_search
 
 # --- Configuration ---
 load_dotenv()
+# IMPORTANT: Setting logging level to DEBUG to capture detailed information
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bot")
 
@@ -293,12 +294,16 @@ async def search_movie_handler(message: types.Message):
         return
 
     searching_msg = await message.answer(f"🔍 {original_query} ki khoj jaari hai…")
+    # --- Logging added for diagnosis ---
+    logger.info(f"USER_SEARCH_FLOW_1: User {user_id} querying '{original_query}'. Starting DB call.")
 
     try:
         top = await asyncio.wait_for(
             db.super_search_movies_advanced(original_query, limit=20),
-            timeout=20.0
+            timeout=10.0 # Reducing timeout slightly from 20s to 10s for better responsiveness
         )
+        # --- Logging added for diagnosis ---
+        logger.info(f"USER_SEARCH_FLOW_2: DB call successful. Query '{original_query}' returned {len(top)} results. Preparing response.")
         
         if not top:
             await searching_msg.edit_text(
@@ -311,6 +316,8 @@ async def search_movie_handler(message: types.Message):
             f"🎬 {original_query} ke liye {len(top)} results mile — file paane ke liye chunein:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
+        # --- Logging added for diagnosis ---
+        logger.info(f"USER_SEARCH_FLOW_3: Response successfully sent for '{original_query}'.")
         
     except asyncio.TimeoutError:
         logger.warning(f"Search timed out for query: {original_query}")
@@ -320,7 +327,7 @@ async def search_movie_handler(message: types.Message):
             pass
             
     except Exception as e:
-        logger.error(f"Search error: {e}")
+        logger.error(f"Search error for '{original_query}': {e}", exc_info=True) # exc_info=True will print traceback
         try:
             await searching_msg.edit_text("❌ Internal error: search system me rukavat aa gayi hai, kuch der baad koshish karein.")
         except TelegramAPIError:
