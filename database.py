@@ -70,19 +70,17 @@ class Database:
         elif database_url.startswith('postgres://'):
             database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
 
-        # FIX: Proper connection pooling for Render free tier
         self.engine = create_async_engine(
             database_url, 
             echo=False, 
             connect_args=connect_args,
-            pool_size=5,              # Max persistent connections
-            max_overflow=10,          # Extra connections when needed
-            pool_pre_ping=True,       # Check connection health before use
-            pool_recycle=3600,        # Recycle connections after 1 hour
-            pool_timeout=30,          # Wait max 30s for connection
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_timeout=30,
         )
         
-        # FIX: Use plain sessionmaker instead of async_scoped_session
         self.SessionLocal = sessionmaker(
             self.engine, 
             expire_on_commit=False, 
@@ -94,7 +92,6 @@ class Database:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             
-            # Migration check for clean_title column
             if self.engine.dialect.name == 'postgresql':
                 try:
                     check_query = text(
@@ -120,7 +117,6 @@ class Database:
                     
         logger.info("Database tables initialized successfully.")
 
-    # FIX: All methods now use async context managers
     async def add_user(self, user_id, username, first_name, last_name):
         async with self.SessionLocal() as session:
             try:
