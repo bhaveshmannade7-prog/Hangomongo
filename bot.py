@@ -395,12 +395,12 @@ async def broadcast_command(message: types.Message):
             except Exception:
                 failed += 1
             if (success + failed) % 100 == 0 and (success + failed) > 0:
-                # FIXED: SyntaxError 6 (The one in the error log)
+                # FIXED: SyntaxError 6
                 await progress_msg.edit_text(f"""📤 Broadcasting…
 ✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}""")
             await asyncio.sleep(0.05) 
             
-        # FIXED: SyntaxError 7 (The final broadcast message, also multiline)
+        # FIXED: SyntaxError 7
         await progress_msg.edit_text(f"""✅ Broadcast Complete!
 
 • Success: {success}
@@ -415,9 +415,11 @@ async def cleanup_users_command(message: types.Message):
     await message.answer("🧹 Inactive users ko clean kiya ja raha hai…")
     removed_count = await db.cleanup_inactive_users(days=30)
     new_count = await db.get_user_count()
-    await message.answer(f"✅ Cleanup complete!
+    
+    # NEW FIX: SyntaxError 8 (Current Error)
+    await message.answer(f"""✅ Cleanup complete!
 • Deactivated: {removed_count}
-• Active Users now: {new_count}")
+• Active Users now: {new_count}""")
 
 @dp.message(Command("add_movie"), AdminFilter())
 async def add_movie_command(message: types.Message):
@@ -451,7 +453,7 @@ async def add_movie_command(message: types.Message):
 
 @dp.message(Command("rebuild_index"), AdminFilter())
 async def rebuild_index_command(message: types.Message):
-    await message.answer("🔧 Clean titles reindex ho rahe hain… yeh operation batched hai.")
+    await message.answer("🔧 Clean titles reindex ho रहे हैं… yeh operation batched hai.")
     updated, total = await db.rebuild_clean_titles()
     await message.answer(f"✅ Reindex complete: Updated {updated} of ~{total} titles. Ab search feature tez aur sahi kaam karega.")
 
