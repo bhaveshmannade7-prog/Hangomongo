@@ -78,8 +78,6 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
-    # NOTE: Membership check logic is currently bypassed (returns True)
-    # If you want to enable it, replace 'return True' with actual logic
     return True 
 
 def get_join_keyboard():
@@ -215,37 +213,26 @@ async def start_command(message: types.Message):
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-        admin_message = f"👑 Admin Console: @{bot_info.username}
-"
-        admin_message += "Access Level: Full Management
+        
+        # FIX: Admin message converted to triple-quoted f-string
+        admin_message = f"""👑 Admin Console: @{bot_info.username}
+Access Level: Full Management
 
-"
-        admin_message += "System Performance & Metrics
-"
-        admin_message += f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
-"
-        admin_message += f"• Total Users: {user_count:,}
-"
-        admin_message += f"• Indexed Movies: {movie_count:,}
-"
-        admin_message += f"• Uptime: {get_uptime()}
+System Performance & Metrics
+• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+• Total Users: {user_count:,}
+• Indexed Movies: {movie_count:,}
+• Uptime: {get_uptime()}
 
-"
-        admin_message += "Management Commands
-"
-        admin_message += "• /stats — Real-time stats
-"
-        admin_message += "• /broadcast — Reply to message to send
-"
-        admin_message += "• /cleanup_users — Deactivate inactive users
-"
-        admin_message += "• /add_movie — Reply: /add_movie imdb_id | title | year
-"
-        admin_message += "• /rebuild_index — Recompute clean titles
-"
-        admin_message += "• /export_csv users|movies [limit]
-"
-        admin_message += "• /set_limit N — Change concurrency cap"
+Management Commands
+• /stats — Real-time stats
+• /broadcast — Reply to message to send
+• /cleanup_users — Deactivate inactive users
+• /add_movie — Reply: /add_movie imdb_id | title | year
+• /rebuild_index — Recompute clean titles
+• /export_csv users|movies [limit]
+• /set_limit N — Change concurrency cap"""
+        
         await message.answer(admin_message)
         return
 
@@ -339,7 +326,7 @@ async def search_movie_handler(message: types.Message):
 
 @dp.callback_query(F.data.startswith("get_"))
 async def get_movie_callback(callback: types.CallbackQuery):
-    await callback.answer("File forward ki ja rahi hai…")
+    await callback.answer("File forward ki ja रही है…")
     imdb_id = callback.data.split("_", 1)[1]
     
     # Check capacity again before file forward
