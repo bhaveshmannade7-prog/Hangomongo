@@ -11,7 +11,6 @@ from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-# CRITICAL FIX: Base exceptions ko module level par import na karein
 from aiogram.exceptions import TelegramAPIError 
 
 from dotenv import load_dotenv
@@ -116,36 +115,33 @@ def get_uptime():
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
-    """Channel aur Group dono mein user ki membership check karta hai."""
-    try:
-        # Channel check
-        channel_member = await bot.get_chat_member(f"@{JOIN_CHANNEL_USERNAME}", user_id)
-        if channel_member.status not in ['member', 'administrator', 'creator']:
-            logger.info(f"User {user_id} failed channel check: @{JOIN_CHANNEL_USERNAME}")
-            return False
-        
-        # Group check
-        group_member = await bot.get_chat_member(f"@{USER_GROUP_USERNAME}", user_id)
-        if group_member.status not in ['member', 'administrator', 'creator']:
-            logger.info(f"User {user_id} failed group check: @{USER_GROUP_USERNAME}")
-            return False
-        
-        return True
-    except TelegramAPIError as e: # Catch all aiogram API errors including ChatNotFound
-        # Agar Channel/Group username galat hai (critical for user's ENV check)
-        # Ya phir koi aur Telegram API error (network, permission) hai.
-        logger.error(f"MEMBERSHIP CHECK FAILED (API Error). Check ENV/Bot Permissions. Error: {e}")
-        return False 
-    except Exception as e: 
-        # Kisi aur general error ke liye
-        logger.error(f"Membership check general failure for user {user_id}: {e}")
-        return False
+    """
+    FIXED: Ab yeh function hamesha True return karta hai (membership bypass).
+    Lekin hum isse user flow ke liye use karte hain.
+    """
+    return True
+    
+    # OLD MEMBERSHIP CHECK LOGIC (Ab zaroorat nahi hai, sirf reference ke liye)
+    # try:
+    #     channel_member = await bot.get_chat_member(f"@{JOIN_CHANNEL_USERNAME}", user_id)
+    #     if channel_member.status not in ['member', 'administrator', 'creator']: return False
+    #     group_member = await bot.get_chat_member(f"@{USER_GROUP_USERNAME}", user_id)
+    #     if group_member.status not in ['member', 'administrator', 'creator']: return False
+    #     return True
+    # except TelegramAPIError as e: 
+    #     logger.error(f"MEMBERSHIP CHECK FAILED (API Error). Error: {e}")
+    #     return False 
+    # except Exception as e: 
+    #     logger.error(f"Membership check general failure for user {user_id}: {e}")
+    #     return False
+
 
 def get_join_keyboard():
     """Zaroori channels join karne ke liye keyboard."""
+    # Channel usernames ke liye buttons (chahe asli mein join ho ya na ho)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Channel Join Karein (Compulsory)", url=f"https://t.me/{JOIN_CHANNEL_USERNAME}")],
-        [InlineKeyboardButton(text="👥 Group Join Karein (Compulsory)", url=f"https://t.me/{USER_GROUP_USERNAME}")],
+        [InlineKeyboardButton(text="📢 Channel Join Karein", url=f"https://t.me/{JOIN_CHANNEL_USERNAME}")],
+        [InlineKeyboardButton(text="👥 Group Join Karein", url=f"https://t.me/{USER_GROUP_USERNAME}")],
         [InlineKeyboardButton(text="✅ I Have Joined Both (Maine Dono Join Kar Liye)", callback_data="check_join")]
     ])
 
@@ -178,6 +174,9 @@ async def start_command(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name
     
+    # CRITICAL FIX: bot.get_me() ko await karke variable mein store karein
+    bot_info = await bot.get_me()
+    
     # User activity log karein (CRITICAL for concurrency check)
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
@@ -188,7 +187,7 @@ async def start_command(message: types.Message):
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         
         admin_message = (
-            f"👑 **Admin Console: {await bot.get_me().username}**\n"
+            f"👑 **Admin Console: @{bot_info.username}**\n"
             f"<i>Access Level: Full Management. All systems are Go.</i>\n\n"
             f"<b><u>System Performance & Metrics:</u></b>\n"
             f"📈 **Active Users (5 Min):** <pre>{concurrent_users:,}/{CONCURRENT_LIMIT}</pre>\n"
@@ -204,25 +203,14 @@ async def start_command(message: types.Message):
         await message.answer(admin_message)
         return
 
-    # --- Regular User Path (Hindi-English Mix Message) ---
-    if not await check_user_membership(user_id):
+    # --- Regular User Path ---
+    # Membership check ko hataya gaya hai, lekin message wahi rakhenge
+    if True: # is member is always True now
         welcome_text = (
-            f"🎬 **Namaskar {first_name}!** \n\n"
-            f"Welcome to the **High-Speed Movie Library Bot**. To begin your search, a quick, mandatory verification is required.\n\n"
-            f"➡️ **Follow these steps carefully:**\n"
-            f"1. **Join** our official Channel.\n"
-            f"2. **Join** our official Group.\n"
-            f"3. Click the **'I Have Joined Both'** button below."
+            f"🎬 **Namaskar {first_name}!** Film Khoj Bot Mein Aapka Swagat Hai.\n\n"
+            f"➡️ Is bot ka upyog karne ke liye, kripya humare **Channel** aur **Group** dono ko join karein. Iske baad, neeche diye gaye **'Maine Dono Join Kar Liye'** button par zaroor click karein."
         )
         await message.answer(welcome_text, reply_markup=get_join_keyboard())
-    else:
-        active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-        welcome_text = (
-            f"🎉 **Welcome Back, {first_name}!** You have full access. \n\n"
-            f"➡️ **Search Shuru Karein:** Bas **movie ya web series ka naam likhein** aur hum aapko file bhejenge. For better results, include the year (e.g., *Avatar 2009*).\n\n"
-            f"<i>ℹ️ **Service Notice:** Humari Free Tier service mein {CONCURRENT_LIMIT} users ki seema hai. Abhi **{active_users}** users active hain.</i>"
-        )
-        await message.answer(welcome_text)
 
 
 @dp.callback_query(F.data == "check_join")
@@ -231,31 +219,29 @@ async def check_join_callback(callback: types.CallbackQuery):
     first_name = callback.from_user.first_name
     
     # CRITICAL FIX: Callback query ko immediately answer karein, taaki Telegram timeout na de.
-    await callback.answer("Membership check ki jaa rahi hai...")
+    await callback.answer("Verification ki jaa rahi hai... Please wait.")
+    
+    # Verification Logic (Ab hamesha successful maana jayega, jaise ki maanga gaya hai)
+    is_member = True 
     
     try:
-        is_member = await check_user_membership(user_id)
-        
         if is_member:
             # Success Case
             active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
             success_text = (
                 f"✅ **Verification Successful, {first_name}!**\n\n"
                 f"You now have **unlimited access** to the library. Start searching for your favorite content now!\n\n"
-                f"<i>ℹ️ **Service Notice:** {CONCURRENT_LIMIT} users ki seema hai. Abhi **{active_users}** users active hain.</i>"
+                f"➡️ **Search Shuru Karein:** Bas **movie ya web series ka naam likhein** aur hum aapko file bhejenge. For better results, include the year (e.g., *Avatar 2009*).\n\n"
+                f"<i>ℹ️ **Service Notice:** Humari Free Tier service mein {CONCURRENT_LIMIT} users ki seema hai. Abhi **{active_users}** users active hain.</i>"
             )
             try:
                 # Message edit karne ki koshish karein
                 await callback.message.edit_text(success_text)
             except TelegramAPIError:
-                 # Agar edit fail hota hai (jo ki mobile par aam hai), to naya message bhejein
+                 # Agar edit fail hota hai, to naya message bhejein
                 logger.warning(f"Failed to edit message in check_join_callback for user {user_id}. Sending new success message.")
                 await bot.send_message(user_id, success_text)
-        else:
-            # Failure Case
-            fail_text = "❌ **Verification Failed!**\n\nKripya **dhyan se** dekhein ki aapne Channel aur Group **dono** ko join kar liya hai. Agar aapne abhi join kiya hai, to phir se **'I Have Joined Both'** button dabayein."
-            # Message edit karein aur keyboard wahi rehne dein
-            await callback.message.edit_text(fail_text, reply_markup=get_join_keyboard())
+        # Failure case ki zaroorat nahi hai kyunki hamesha True return kar rahe hain
     
     except Exception as e:
         logger.error(f"Critical error in check_join_callback for user {user_id}: {e}")
@@ -271,10 +257,10 @@ async def search_movie_handler(message: types.Message):
     # 1. User activity log karein
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
-    # 2. Membership Check
-    if user_id != ADMIN_USER_ID and not await check_user_membership(user_id):
-        await message.answer("❌ **Pehle Zaroori Channels Join Karein** ❌\n\nKripya movie search karne se pehle zaroori Channel aur Group join karein aur **'I Have Joined Both'** button dabayein.", reply_markup=get_join_keyboard())
-        return
+    # 2. Membership Check (Bypass)
+    if not await check_user_membership(user_id):
+         # Yeh block technically unreachable hai kyunki check_user_membership hamesha True hai.
+        return 
 
     # 3. Concurrency Limit Check (Robust and Professional Message)
     if user_id != ADMIN_USER_ID:
@@ -445,7 +431,4 @@ async def auto_index_handler(message: types.Message):
         
     success = await db.add_movie(
         imdb_id=imdb_id, title=movie_info.get('title'), year=movie_info.get('year'),
-        file_id=file_id, channel_id=LIBRARY_CHANNEL_ID, message_id=message.message_id
-    )
-    if success: logger.info(f"✅ Auto-indexed: {movie_info.get('title')}")
-    else: logger.error(f"Auto-index database error for: {movie_info.get('title')}")
+      
