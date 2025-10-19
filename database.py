@@ -1,6 +1,7 @@
 import logging
 import re
 import asyncio
+import hashlib # <--- NEW IMPORT
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 
@@ -24,7 +25,6 @@ def _normalize_for_fuzzy(text: str) -> str:
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
-    # t = re.sub(r'(.)\u0001+', r'\u0001', t) # Bug fix: This line was commented out/removed as it was incorrect/unnecessary
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
@@ -35,6 +35,34 @@ def _consonant_signature(text: str) -> str:
     t = re.sub(r'[aeiou]', '', t)
     t = re.sub(r's+', '', t)
     return t
+
+# --- NEW HELPER FUNCTION TO TRANSFORM DATA ---
+def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict:
+    """
+    Generates required missing fields (imdb_id, year, message_id) for the new structure.
+    """
+    title = movie_data.get("title", "Unknown Title")
+    file_id = movie_data.get("file_id", "NO_FILE_ID")
+    
+    # 1. IMDB ID (Using a hash of title+file_id to ensure near-uniqueness)
+    hash_object = hashlib.sha1(f"{title}{file_id}".encode('utf-8'))
+    auto_imdb_id = f"auto_{hash_object.hexdigest()[:15]}" 
+
+    # 2. Year (Attempt to extract year from title)
+    year_match = re.search(r'\b(19|20)\d{2}\b', title)
+    year = year_match.group(0) if year_match else None
+
+    # 3. Message ID (Using a large placeholder)
+    auto_message_id = 9999999999999  
+
+    return {
+        "imdb_id": auto_imdb_id,
+        "title": title,
+        "year": year,
+        "file_id": file_id,
+        "message_id": auto_message_id,
+        "channel_id": channel_id,
+    }
 
 # --- New Synchronous Helper Function for CPU-Bound Logic ---
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
@@ -219,6 +247,60 @@ class Database:
                 logger.error(f"Movie add error: {e}")
                 await session.rollback()
                 return False
+
+    # --- NEW FUNCTION TO HANDLE NEW JSON STRUCTURE ---
+    async def bulk_add_new_movies(self, movies_data: List[Dict], channel_id: int):
+        """
+        Processes and adds a list of movies from the simple (title, file_id) structure.
+        Generates auto fields (imdb_id, message_id, year).
+        """
+        added_count = 0
+        skipped_count = 0
+        
+        async with self.SessionLocal() as session:
+            for new_movie in movies_data:
+                try:
+                    # Transform the simple data to the required complex structure
+                    transformed_data = generate_auto_info(new_movie, channel_id)
+                    
+                    # Check if an entry with this auto-generated imdb_id already exists
+                    result = await session.execute(
+                        select(Movie.id).filter(Movie.imdb_id == transformed_data['imdb_id'])
+                    )
+                    if result.scalar_one_or_none():
+                        skipped_count += 1
+                        continue # Skip if already exists
+                        
+                    # Prepare the data for insertion
+                    clean_title = clean_text_for_search(transformed_data['title'])
+                    
+                    new_movie_entry = Movie(
+                        imdb_id=transformed_data['imdb_id'], 
+                        title=transformed_data['title'], 
+                        clean_title=clean_title, 
+                        year=transformed_data['year'],
+                        file_id=transformed_data['file_id'], 
+                        message_id=transformed_data['message_id'], 
+                        channel_id=transformed_data['channel_id']
+                    )
+                    
+                    session.add(new_movie_entry)
+                    added_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error processing new movie data: {new_movie}. Error: {e}")
+                    # Continue to the next entry even if one fails
+            
+            # Commit all processed entries at the end of the batch
+            if added_count > 0:
+                try:
+                    await session.commit()
+                except Exception as e:
+                    await session.rollback()
+                    logger.error(f"Bulk commit failed: {e}")
+            
+        return added_count, skipped_count
+
 
     async def get_movie_count(self):
         async with self.SessionLocal() as session:
