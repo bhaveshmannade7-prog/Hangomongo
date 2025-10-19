@@ -15,7 +15,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.client.default import DefaultBotProperties
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks, Request
+from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 
 from database import Database, clean_text_for_search
 
@@ -31,8 +31,8 @@ JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g. https://your-service.onrender.com
-PUBLIC_URL = os.getenv("PUBLIC_URL")                    # optional fallback
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+PUBLIC_URL = os.getenv("PUBLIC_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 DEFAULT_CONCURRENT_LIMIT = int(os.getenv("CONCURRENT_LIMIT", "35"))
@@ -101,10 +101,10 @@ def extract_movie_info(caption: str):
         if len(lines) > 1 and re.search(r"Sd{1,2}", lines[1], re.IGNORECASE):
             title += " " + lines[1].strip()
         info["title"] = title
-    imdb_match = re.search(r"(tt\d{7,})", caption)
+    imdb_match = re.search(r"(ttd{7,})", caption)
     if imdb_match:
         info["imdb_id"] = imdb_match.group(1)
-    year_match = re.search(r"\b(19|20)\d{2}\b", caption)
+    year_match = re.search(r"\b(19|20)d{2}\b", caption)
     if year_match:
         info["year"] = year_match.group(0)
     return info if "title" in info else None
@@ -116,7 +116,6 @@ Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal 
 aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
 
 Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
-
 
 # --- Keep DB alive ---
 async def keep_db_alive():
@@ -130,7 +129,6 @@ async def keep_db_alive():
 # --- Lifespan management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # db.init_db is now crash-proof
     await db.init_db()
     db_task = asyncio.create_task(keep_db_alive())
 
@@ -160,20 +158,27 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# FIX: Improved update processing with proper error handling
 async def _process_update(u: Update):
     try:
         await dp.feed_update(bot=bot, update=u)
     except Exception as e:
-        logger.exception(f"feed_update failed: {e}") 
+        logger.exception(f"feed_update failed: {e}")
         
 @app.post(f"/bot/{BOT_TOKEN}")
 async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: Request):
-    if WEBHOOK_SECRET:
-        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-            return {"ok": False}
-    telegram_update = Update(**update)
-    background_tasks.add_task(_process_update, telegram_update)
-    return {"ok": True}
+    try:
+        if WEBHOOK_SECRET:
+            if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+                logger.warning("Invalid webhook secret token")
+                raise HTTPException(status_code=403, detail="Forbidden")
+        
+        telegram_update = Update(**update)
+        background_tasks.add_task(_process_update, telegram_update)
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+        return {"ok": False}
 
 @app.get("/")
 async def ping():
@@ -205,29 +210,48 @@ async def start_command(message: types.Message):
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         admin_message = (
-            f"👑 Admin Console: @{bot_info.username}\n"
-            "Access Level: Full Management\n\n"
-            "System Performance & Metrics\n"
-            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}\n"
-            f"• Total Users: {user_count:,}\n"
-            f"• Indexed Movies: {movie_count:,}\n"
-            f"• Uptime: {get_uptime()}\n\n"
-            "Management Commands\n"
-            "• /stats — Real-time stats\n"
-            "• /broadcast — Reply to message to send\n"
-            "• /cleanup_users — Deactivate inactive users\n"
-            "• /add_movie — Reply: /add_movie imdb_id | title | year\n"
-            "• /rebuild_index — Recompute clean titles\n"
-            "• /export_csv users|movies [limit]\n"
+            f"👑 Admin Console: @{bot_info.username}
+"
+            "Access Level: Full Management
+
+"
+            "System Performance & Metrics
+"
+            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+"
+            f"• Total Users: {user_count:,}
+"
+            f"• Indexed Movies: {movie_count:,}
+"
+            f"• Uptime: {get_uptime()}
+
+"
+            "Management Commands
+"
+            "• /stats — Real-time stats
+"
+            "• /broadcast — Reply to message to send
+"
+            "• /cleanup_users — Deactivate inactive users
+"
+            "• /add_movie — Reply: /add_movie imdb_id | title | year
+"
+            "• /rebuild_index — Recompute clean titles
+"
+            "• /export_csv users|movies [limit]
+"
             "• /set_limit N — Change concurrency cap"
         )
         await message.answer(admin_message)
         return
 
     welcome_text = (
-        f"🎬 Namaskar {message.from_user.first_name}!\n"
-        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).\n\n"
-        "Hamare Channel aur Group join karne ke baad niche “I Have Joined Both” dabayen aur turant access paayen."
+        f"🎬 Namaskar {message.from_user.first_name}!
+"
+        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
+
+"
+        "Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen."
     )
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
 
@@ -242,8 +266,12 @@ async def check_join_callback(callback: types.CallbackQuery):
             return
             
         success_text = (
-            f"✅ Verification successful, {callback.from_user.first_name}!\n\n"
-            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.\n\n"
+            f"✅ Verification successful, {callback.from_user.first_name}!
+
+"
+            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
+
+"
             f"Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."
         )
         try:
@@ -275,12 +303,10 @@ async def search_movie_handler(message: types.Message):
     searching_msg = await message.answer(f"🔍 {original_query} ki khoj jaari hai…")
 
     try:
-        # --- FIX APPLIED: Added a 20-second timeout for the search operation ---
         top = await asyncio.wait_for(
             db.super_search_movies_advanced(original_query, limit=20),
             timeout=20.0
         )
-        # -----------------------------------------------------------------------
         
         if not top:
             await searching_msg.edit_text(
@@ -295,10 +321,9 @@ async def search_movie_handler(message: types.Message):
         )
         
     except asyncio.TimeoutError:
-        # Handle the timeout case specifically, and inform the user
         logger.warning(f"Search timed out for query: {original_query}")
         try:
-            await searching_msg.edit_text("⌛️ Search mein samay zyada lag gaya (Database/Server slow). Kripya kuch der baad phir se koshish karein ya alternate bot use karein.")
+            await searching_msg.edit_text("⌛️ Search mein samay zyada lag gaya (Database slow). Kripya kuch der baad phir se koshish karein.")
         except TelegramAPIError:
             pass
             
@@ -308,7 +333,6 @@ async def search_movie_handler(message: types.Message):
             await searching_msg.edit_text("❌ Internal error: search system me rukavat aa gayi hai, kuch der baad koshish karein.")
         except TelegramAPIError:
             pass
-
 
 @dp.callback_query(F.data.startswith("get_"))
 async def get_movie_callback(callback: types.CallbackQuery):
@@ -341,7 +365,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
         logger.error(f"Movie callback critical error: {e}")
         await bot.send_message(callback.from_user.id, "❌ Critical system error: kripya /start karein.")
 
-# --- Admin Commands (7) ---
+# --- Admin Commands ---
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
     await db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
@@ -349,11 +373,17 @@ async def stats_command(message: types.Message):
     movie_count = await db.get_movie_count()
     concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     await message.answer(
-        "📊 Live System Statistics\n\n"
-        f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}\n"
-        f"👥 Total Users: {user_count:,}\n"
-        f"🎬 Indexed Movies: {movie_count:,}\n"
-        "⚙️ Status: Operational\n"
+        "📊 Live System Statistics
+
+"
+        f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+"
+        f"👥 Total Users: {user_count:,}
+"
+        f"🎬 Indexed Movies: {movie_count:,}
+"
+        "⚙️ Status: Operational
+"
         f"⏰ Uptime: {get_uptime()}"
     )
 
@@ -376,22 +406,27 @@ async def broadcast_command(message: types.Message):
             except Exception:
                 failed += 1
             if (success + failed) % 100 == 0 and (success + failed) > 0:
-                await progress_msg.edit_text(f"📤 Broadcasting…\n✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}")
+                await progress_msg.edit_text(f"📤 Broadcasting…
+✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}")
             await asyncio.sleep(0.05) 
             
-        await progress_msg.edit_text(f"✅ Broadcast Complete!\n\n• Success: {success}\n• Failed: {failed}")
+        await progress_msg.edit_text(f"✅ Broadcast Complete!
+
+• Success: {success}
+• Failed: {failed}")
         
     except Exception as e:
         logger.error(f"Broadcast failed: {e}")
         await message.answer("❌ Broadcasting process mein rukawat aa gayi.")
-
 
 @dp.message(Command("cleanup_users"), AdminFilter())
 async def cleanup_users_command(message: types.Message):
     await message.answer("🧹 Inactive users ko clean kiya ja raha hai…")
     removed_count = await db.cleanup_inactive_users(days=30)
     new_count = await db.get_user_count()
-    await message.answer(f"✅ Cleanup complete!\n• Deactivated: {removed_count}\n• Active Users now: {new_count}")
+    await message.answer(f"✅ Cleanup complete!
+• Deactivated: {removed_count}
+• Active Users now: {new_count}")
 
 @dp.message(Command("add_movie"), AdminFilter())
 async def add_movie_command(message: types.Message):
@@ -440,16 +475,20 @@ async def export_csv_command(message: types.Message):
     try:
         if kind == "users":
             rows = await db.export_users(limit=limit)
-            header = "user_id,username,first_name,last_name,joined_date,last_active,is_active\n"
-            csv = header + "\n".join([
+            header = "user_id,username,first_name,last_name,joined_date,last_active,is_active
+"
+            csv = header + "
+".join([
                 f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
                 for r in rows
             ])
             await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="users.csv"), caption="Users export")
         else:
             rows = await db.export_movies(limit=limit)
-            header = "imdb_id,title,year,channel_id,message_id,added_date\n"
-            csv = header + "\n".join([
+            header = "imdb_id,title,year,channel_id,message_id,added_date
+"
+            csv = header + "
+".join([
                 f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
                 for r in rows
             ])
@@ -458,7 +497,6 @@ async def export_csv_command(message: types.Message):
     except Exception as e:
         logger.error(f"Export CSV failed: {e}")
         await message.answer("❌ Data export karne me internal error aaya.")
-
 
 @dp.message(Command("set_limit"), AdminFilter())
 async def set_limit_command(message: types.Message):
