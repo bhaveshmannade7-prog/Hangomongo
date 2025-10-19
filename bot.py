@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import asyncio
 import logging
@@ -10,7 +11,11 @@ from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramAPIError, ChatNotFound, TelegramBadRequest # Specific exceptions for robust handling
+# CRITICAL FIX: Exceptions ko specific modules se import kiya gaya hai (aiogram v3+ compatibility)
+from aiogram.exceptions import TelegramAPIError 
+from aiogram.exceptions.base import TelegramBadRequest
+from aiogram.exceptions.other import ChatNotFound 
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
