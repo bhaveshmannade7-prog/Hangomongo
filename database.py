@@ -12,8 +12,10 @@ Base = declarative_base()
 
 def clean_text_for_search(text: str) -> str:
     text = text.lower()
+    # "S1" jaise patterns ko theek rakhein, baaki cleaning karein
     text = re.sub(r'\b(s|season|seson|sisan)\s*(\d{1,2})\b', r's\2', text)
     text = re.sub(r'complete season', '', text)
+    # Non-alphanumeric characters ko space se replace karein
     text = re.sub(r'[\W_]+', ' ', text)
     return text.strip()
 
@@ -43,12 +45,13 @@ class Database:
     def __init__(self, database_url: str):
         
         connect_args = {}
-        # FIX: asyncpg error ke liye sslmode ko connect_args mein pass karein
+        # FIX: Render ke liye SSL connection handle karein
         if '?sslmode=require' in database_url:
             database_url = database_url.replace('?sslmode=require', '')
+            # connect_args['ssl'] = 'require' - asyncpg automatically handles boolean True for required SSL
             connect_args['ssl'] = True
         
-        # FIX: Agar URL mein async driver missing ho to usko theek karein
+        # FIX: Agar URL mein async driver missing ho to usko theek karein (e.g., 'postgresql://' -> 'postgresql+asyncpg://')
         if database_url.startswith('postgresql://'):
             database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
         elif database_url.startswith('postgres://'):
@@ -78,9 +81,11 @@ class Database:
             result = await session.execute(select(User).filter(User.user_id == user_id))
             user = result.scalar_one_or_none()
             if user:
+                # Agar user maujood hai to sirf last_active update karein aur active rakhein
                 user.last_active = datetime.utcnow()
                 user.is_active = True
             else:
+                # Naya user add karein
                 session.add(User(user_id=user_id, username=username, first_name=first_name, last_name=last_name))
             await session.commit()
         finally: await session.close()
@@ -88,6 +93,7 @@ class Database:
     async def get_concurrent_user_count(self, minutes: int = 5):
         session = self.get_session()
         try:
+            # Pichle 'minutes' mein active users ki ginti
             cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
             result = await session.execute(
                 select(func.count(User.user_id))
@@ -100,6 +106,7 @@ class Database:
     async def get_all_users(self):
         session = self.get_session()
         try: 
+            # Sabhi active users ki ID laayein (broadcast ke liye)
             result = await session.execute(select(User.user_id).filter(User.is_active == True))
             return result.scalars().all()
         finally: await session.close()
@@ -107,6 +114,7 @@ class Database:
     async def get_user_count(self):
         session = self.get_session()
         try: 
+            # Total users ki ginti
             result = await session.execute(select(func.count(User.user_id)))
             return result.scalar_one()
         finally: await session.close()
@@ -114,6 +122,7 @@ class Database:
     async def cleanup_inactive_users(self, days: int):
         session = self.get_session()
         try:
+            # Inactive users ko deactivate karein
             cutoff_date = datetime.utcnow() - timedelta(days=days)
             result = await session.execute(
                 select(User).filter(User.last_active < cutoff_date, User.is_active == True)
@@ -145,6 +154,7 @@ class Database:
     async def get_movie_count(self):
         session = self.get_session()
         try: 
+            # Total movies ki ginti
             result = await session.execute(select(func.count(Movie.id)))
             return result.scalar_one()
         finally: await session.close()
@@ -152,6 +162,7 @@ class Database:
     async def get_movie_by_imdb(self, imdb_id: str):
         session = self.get_session()
         try:
+            # IMDB ID se movie laayein
             result = await session.execute(
                 select(Movie).filter(Movie.imdb_id == imdb_id)
             )
@@ -171,8 +182,10 @@ class Database:
     async def super_search_movies(self, query: str, limit: int = 20):
         session = self.get_session()
         try:
+            # Full text search pattern
             search_pattern = '%' + '%'.join(query.split()) + '%'
             
+            # DB se potential matches laayein
             result = await session.execute(
                 select(Movie.imdb_id, Movie.title)
                 .filter(Movie.clean_title.ilike(search_pattern))
@@ -183,10 +196,11 @@ class Database:
             if not potential_matches:
                 return []
             
+            # TheFuzz ka upyog karke score karein
             choices = {title: imdb_id for imdb_id, title in potential_matches}
-            
             results = process.extract(query, choices.keys(), limit=limit) 
             
+            # 65 se zyada score waale results ko final list mein daalein
             final_list = []
             for title, score in results:
                 if score > 65:  
