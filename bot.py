@@ -110,7 +110,7 @@ def extract_movie_info(caption: str):
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    # FIX 1: Fixed SyntaxError by using triple quotes for multiline f-string.
+    # FIXED: SyntaxError 1
     msg = f"""⚠️ Capacity Reached
 
 Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai 
@@ -214,7 +214,7 @@ async def start_command(message: types.Message):
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         
-        # FIX 2: Admin message converted to triple-quoted f-string
+        # FIXED: SyntaxError 2
         admin_message = f"""👑 Admin Console: @{bot_info.username}
 Access Level: Full Management
 
@@ -236,7 +236,7 @@ Management Commands
         await message.answer(admin_message)
         return
 
-    # FIX 3: Welcome message converted to triple-quoted f-string
+    # FIXED: SyntaxError 3
     welcome_text = f"""🎬 Namaskar {message.from_user.first_name}!
 
 Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
@@ -256,14 +256,13 @@ async def check_join_callback(callback: types.CallbackQuery):
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
             
-        # Assuming check_user_membership is True as per current setup
-        success_text = f"✅ Verification successful, {callback.from_user.first_name}!
+        # FIXED: SyntaxError 4 (This was the newest error in your log)
+        success_text = f"""✅ Verification successful, {callback.from_user.first_name}!
 
-"
-        success_text += "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
+Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
 
-"
-        success_text += f"Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."
+Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."""
+        
         try:
             await callback.message.edit_text(success_text)
         except TelegramAPIError:
