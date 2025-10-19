@@ -78,7 +78,9 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
-    return True
+    # NOTE: Membership check logic is currently bypassed (returns True)
+    # If you want to enable it, replace 'return True' with actual logic
+    return True 
 
 def get_join_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -110,14 +112,13 @@ def extract_movie_info(caption: str):
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    msg = f"⚠️ Capacity Reached
+    # FIX: SyntaxError: unterminated f-string literal fixed by using triple quotes.
+    msg = f"""⚠️ Capacity Reached
 
-"
-    msg += f"Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai "
-    msg += f"aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
+Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai 
+aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
 
-"
-    msg += "Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."
+Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
     return msg
 
 # --- Keep DB alive ---
@@ -194,6 +195,8 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     if active >= CURRENT_CONC_LIMIT:
         await message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard())
         return False
+    # Update user's last_active time
+    await db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
     return True
 
 # --- Handlers ---
@@ -202,6 +205,7 @@ async def start_command(message: types.Message):
     user_id = message.from_user.id
     bot_info = await bot.get_me()
 
+    # Ensure user is added/updated before capacity check
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
     if not await ensure_capacity_or_inform(message):
@@ -250,7 +254,7 @@ async def start_command(message: types.Message):
     welcome_text += "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
 
 "
-    welcome_text += "Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen."
+    welcome_text += "Hamare Channel aur Group join karne ke baad niche \"I Have Joined Both\" dabayen aur turant access paayen."
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
 
 @dp.callback_query(F.data == "check_join")
@@ -259,10 +263,12 @@ async def check_join_callback(callback: types.CallbackQuery):
     try:
         active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         if active_users >= CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
-            await callback.message.edit_text(overflow_message(active_users))
+            # Re-fetch active_users just in case it changed slightly
+            await callback.message.edit_text(overflow_message(await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)))
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
             
+        # Assuming check_user_membership is True as per current setup
         success_text = f"✅ Verification successful, {callback.from_user.first_name}!
 
 "
@@ -273,6 +279,7 @@ async def check_join_callback(callback: types.CallbackQuery):
         try:
             await callback.message.edit_text(success_text)
         except TelegramAPIError:
+            # Handle case where message is too old to edit
             await bot.send_message(callback.from_user.id, success_text)
             
     except Exception as e:
@@ -282,7 +289,7 @@ async def check_join_callback(callback: types.CallbackQuery):
 @dp.message(F.text & ~F.text.startswith("/") & (F.chat.type == "private"))
 async def search_movie_handler(message: types.Message):
     user_id = message.from_user.id
-    await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+    # Note: User update is now also inside ensure_capacity_or_inform
 
     if not await check_user_membership(user_id):
         await message.answer("⚠️ Kripya pehle Channel aur Group join karein, phir se /start dabayen.", reply_markup=get_join_keyboard())
@@ -335,8 +342,9 @@ async def get_movie_callback(callback: types.CallbackQuery):
     await callback.answer("File forward ki ja rahi hai…")
     imdb_id = callback.data.split("_", 1)[1]
     
+    # Check capacity again before file forward
     if not await ensure_capacity_or_inform(callback.message):
-        await bot.send_message(callback.from_user.id, overflow_message(await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)), reply_markup=get_full_limit_keyboard())
+        # We don't want to double message, ensure_capacity_or_inform sends the overflow message
         return
         
     movie = await db.get_movie_by_imdb(imdb_id)
@@ -345,6 +353,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     try:
+        # Edit the message to show processing status
         await callback.message.edit_text(f"✅ {movie['title']} — file bheji ja rahi hai, kripya chat check karein.")
         
         await bot.forward_message(
@@ -472,8 +481,7 @@ async def export_csv_command(message: types.Message):
             rows = await db.export_users(limit=limit)
             header = "user_id,username,first_name,last_name,joined_date,last_active,is_active
 "
-            csv = header + "
-".join([
+            csv = header + "\n".join([
                 f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
                 for r in rows
             ])
@@ -482,8 +490,7 @@ async def export_csv_command(message: types.Message):
             rows = await db.export_movies(limit=limit)
             header = "imdb_id,title,year,channel_id,message_id,added_date
 "
-            csv = header + "
-".join([
+            csv = header + "\n".join([
                 f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
                 for r in rows
             ])
