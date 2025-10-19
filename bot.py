@@ -17,7 +17,6 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Request
 
-# database.py में 'clean_text_for_search' फ़ंक्शन अब बदल गया है
 from database import Database, clean_text_for_search
 
 # --- Configuration ---
@@ -79,9 +78,6 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
-    # NOTE: Since actual check requires API calls, we return True by default 
-    # but the logic for failure needs to be handled in the calling function.
-    # For a simple deployment, we'll rely on the join check callback for non-admins.
     return True
 
 def get_join_keyboard():
@@ -127,8 +123,7 @@ Be-rukavat access ke liye alternate bots use karein; neeche se choose karke tura
 async def keep_db_alive():
     while True:
         try:
-            # Added a simple check to ensure DB is responsive
-            await db.get_user_count() 
+            await db.get_user_count()
         except Exception as e:
             logger.error(f"DB keepalive failed: {e}")
         await asyncio.sleep(240)
@@ -136,7 +131,7 @@ async def keep_db_alive():
 # --- Lifespan management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # This will now include the manual migration check
+    # db.init_db is now crash-proof
     await db.init_db()
     db_task = asyncio.create_task(keep_db_alive())
 
@@ -170,7 +165,7 @@ async def _process_update(u: Update):
     try:
         await dp.feed_update(bot=bot, update=u)
     except Exception as e:
-        logger.exception(f"feed_update failed: {e}") # This now logs the full traceback
+        logger.exception(f"feed_update failed: {e}") 
         
 @app.post(f"/bot/{BOT_TOKEN}")
 async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: Request):
@@ -247,10 +242,6 @@ async def check_join_callback(callback: types.CallbackQuery):
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
             
-        # NOTE: For a real bot, actual membership check should be here.
-        # Since we are assuming True in check_user_membership, this section 
-        # is reached and success is displayed.
-            
         success_text = (
             f"✅ Verification successful, {callback.from_user.first_name}!\n\n"
             "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.\n\n"
@@ -271,7 +262,6 @@ async def search_movie_handler(message: types.Message):
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
     if not await check_user_membership(user_id):
-        # Added message if membership is not verified
         await message.answer("⚠️ Kripya pehle Channel aur Group join karein, phir se /start dabayen.", reply_markup=get_join_keyboard())
         return
 
@@ -283,10 +273,10 @@ async def search_movie_handler(message: types.Message):
         await message.answer("🤔 Kripya kam se kam 2 characters ka query bhejein.")
         return
 
-    # Use try/finally to ensure the searching message is updated/deleted
     searching_msg = await message.answer(f"🔍 {original_query} ki khoj jaari hai…")
 
     try:
+        # Fuzzy search logic is now crash-proof
         top = await db.super_search_movies_advanced(original_query, limit=20)
         
         if not top:
@@ -315,7 +305,6 @@ async def get_movie_callback(callback: types.CallbackQuery):
     imdb_id = callback.data.split("_", 1)[1]
     
     if not await ensure_capacity_or_inform(callback.message):
-        # Concurrency check
         await bot.send_message(callback.from_user.id, overflow_message(await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)), reply_markup=get_full_limit_keyboard())
         return
         
@@ -325,10 +314,8 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     try:
-        # Edit the inline message first
         await callback.message.edit_text(f"✅ {movie['title']} — file bheji ja rahi hai, kripya chat check karein.")
         
-        # Forward the file
         await bot.forward_message(
             chat_id=callback.from_user.id,
             from_chat_id=int(movie["channel_id"]),
@@ -337,7 +324,6 @@ async def get_movie_callback(callback: types.CallbackQuery):
         
     except TelegramAPIError as e:
         logger.error(f"Forward/edit error for {imdb_id}: {e}")
-        # Send a new message if editing failed or forwarding failed (e.g., bot lost channel access)
         await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: {movie['title']} ko forward karne me dikat aayi, kripya phir se try karein.")
         
     except Exception as e:
@@ -369,7 +355,6 @@ async def broadcast_command(message: types.Message):
     total_users = len(users)
     success, failed = 0, 0
     
-    # Use try/finally to ensure progress message is updated
     progress_msg = await message.answer(f"📤 Broadcasting to {total_users} users…")
     
     try:
@@ -381,7 +366,7 @@ async def broadcast_command(message: types.Message):
                 failed += 1
             if (success + failed) % 100 == 0 and (success + failed) > 0:
                 await progress_msg.edit_text(f"📤 Broadcasting…\n✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}")
-            await asyncio.sleep(0.05) # Throttle to prevent hitting Telegram API limits
+            await asyncio.sleep(0.05) 
             
         await progress_msg.edit_text(f"✅ Broadcast Complete!\n\n• Success: {success}\n• Failed: {failed}")
         
@@ -430,7 +415,6 @@ async def add_movie_command(message: types.Message):
 @dp.message(Command("rebuild_index"), AdminFilter())
 async def rebuild_index_command(message: types.Message):
     await message.answer("🔧 Clean titles reindex ho rahe hain… yeh operation batched hai.")
-    # The rebuild_clean_titles function now has crash-proofing in database.py
     updated, total = await db.rebuild_clean_titles()
     await message.answer(f"✅ Reindex complete: Updated {updated} of ~{total} titles. Ab search feature tez aur sahi kaam karega.")
 
