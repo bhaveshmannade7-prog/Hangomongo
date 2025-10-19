@@ -11,6 +11,7 @@ from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramAPIError, ChatNotFound # Specific exceptions for robust handling
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
@@ -22,7 +23,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# Admin ID ko int mein convert karna zaroori hai
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "7263519581"))
 LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", "-1003138949015"))
 JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
@@ -32,7 +32,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # --- User Limit and Alternate Bots ---
 CONCURRENT_LIMIT = 35 
 ACTIVE_WINDOW_MINUTES = 5
-# Alternate Bots ki list update ki gayi hai
+# Aapke teenon bots yahan shamil hain
 ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME") 
@@ -55,6 +55,7 @@ class AdminFilter(BaseFilter):
 
 # --- FastAPI App & DB Keep Alive ---
 async def keep_db_alive():
+    """Database connection ko zinda (alive) rakhne ke liye periodic ping."""
     while True:
         try:
             await db.get_user_count() 
@@ -67,11 +68,11 @@ async def lifespan(app: FastAPI):
     await db.init_db()
     db_task = asyncio.create_task(keep_db_alive())
     
-    # Webhook set karein
     if RENDER_EXTERNAL_HOSTNAME:
         try:
             current_webhook = await bot.get_webhook_info()
             if current_webhook.url != WEBHOOK_URL:
+                # Webhook URL ko set/update karein
                 await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
                 logger.info(f"Webhook set to: {WEBHOOK_URL}")
         except Exception as e:
@@ -91,7 +92,6 @@ app = FastAPI(lifespan=lifespan)
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(update: dict):
     telegram_update = Update(**update)
-    # Ensure update is fed to dispatcher
     await dp.feed_update(bot=bot, update=telegram_update)
     return {"ok": True}
 
@@ -101,6 +101,7 @@ async def ping():
 
 # --- Helper Functions ---
 def get_uptime():
+    """Bot instance ka uptime calculation."""
     delta = datetime.utcnow() - start_time
     hours, remainder = divmod(int(delta.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -110,39 +111,41 @@ def get_uptime():
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
+    """Channel aur Group dono mein user ki membership check karta hai."""
     try:
-        # Check channel membership
+        # Channel check
         channel_member = await bot.get_chat_member(f"@{JOIN_CHANNEL_USERNAME}", user_id)
-        if channel_member.status not in ['member', 'administrator', 'creator']: 
-            logger.info(f"User {user_id} not member of channel @{JOIN_CHANNEL_USERNAME}")
-            return False
+        if channel_member.status not in ['member', 'administrator', 'creator']: return False
         
-        # Check group membership
+        # Group check
         group_member = await bot.get_chat_member(f"@{USER_GROUP_USERNAME}", user_id)
-        if group_member.status not in ['member', 'administrator', 'creator']: 
-            logger.info(f"User {user_id} not member of group @{USER_GROUP_USERNAME}")
-            return False
-            
+        if group_member.status not in ['member', 'administrator', 'creator']: return False
+        
         return True
+    except ChatNotFound as e:
+        # Agar Channel/Group username galat hai
+        logger.error(f"Membership check failed: Channel/Group username not found. Check JOIN_CHANNEL_USERNAME/USER_GROUP_USERNAME. Error: {e}")
+        return False # Safety: Agar check nahi ho sakta, to access na dein.
     except Exception as e: 
-        logger.error(f"Error checking user {user_id} membership: {e}")
-        # Telegram API errors (like 'Chat not found' for username) will be caught here.
+        # Kisi aur Telegram API error ya network issue ke liye
+        logger.error(f"Membership check failed for user {user_id}. General error: {e}")
         return False
 
 def get_join_keyboard():
-    # Use JOIN_CHANNEL_USERNAME directly from env
+    """Zaroori channels join karne ke liye keyboard."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Channel Join Karein", url=f"https://t.me/{JOIN_CHANNEL_USERNAME}"),
-         InlineKeyboardButton(text="👥 Group Join Karein", url=f"https://t.me/{USER_GROUP_USERNAME}")],
+        [InlineKeyboardButton(text="📢 Channel Join Karein (Mandatory)", url=f"https://t.me/{JOIN_CHANNEL_USERNAME}"),
+         InlineKeyboardButton(text="👥 Group Join Karein (Mandatory)", url=f"https://t.me/{USER_GROUP_USERNAME}")],
         [InlineKeyboardButton(text="✅ I Have Joined Both (Maine Dono Join Kar Liye)", callback_data="check_join")]
     ])
 
 def get_full_limit_keyboard():
-    # Dynamically alternate bots ke liye buttons bana rahe hain
+    """Limit full hone par alternate bots ke liye keyboard."""
     buttons = [[InlineKeyboardButton(text=f"🚀 @{bot_user}", url=f"https://t.me/{bot_user}")] for bot_user in ALTERNATE_BOTS]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def extract_movie_info(caption: str):
+    """Caption se movie information nikalne ka logic."""
     if not caption: return None
     info = {}
     lines = caption.strip().split('\n')
@@ -164,18 +167,18 @@ async def start_command(message: types.Message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name
     
-    # User activity log karein
+    # User activity log karein (Zaroori: last_active update karne ke liye)
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
     if user_id == ADMIN_USER_ID:
-        # --- Professional Admin Path ---
+        # --- Admin Path (Professional Message) ---
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count() 
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         
         admin_message = (
             f"👑 **Admin Console: {await bot.get_me().username}**\n"
-            f"<i>You are accessing the highly secure administrative dashboard.</i>\n\n"
+            f"<i>Access Granted. Monitor system health and manage database.</i>\n\n"
             f"<b><u>System Performance & Metrics:</u></b>\n"
             f"📊 **Active Users (5 Min):** <pre>{concurrent_users:,}/{CONCURRENT_LIMIT}</pre>\n"
             f"👥 **Total Registered Users:** <pre>{user_count:,}</pre>\n"
@@ -190,14 +193,14 @@ async def start_command(message: types.Message):
         await message.answer(admin_message)
         return
 
-    # --- Regular User Path (Hindi-English Mix) ---
+    # --- Regular User Path (Hindi-English Mix Message) ---
     if not await check_user_membership(user_id):
         welcome_text = (
-            f"🎬 **Hello {first_name}! Film Search Bot Mein Aapka Swagat Hai.**\n\n"
-            f"To access our *Free & High-Speed Movie Library*, you must complete a quick verification step. Kripya neeche diye gaye **dono Channel aur Group** ko turant join karein. \n\n"
-            f"**Verification Step:**\n"
-            f"1. Join our Official Channel (Zaroori!)\n"
-            f"2. Join our Discussion Group (Mandatory!)\n"
+            f"🎬 **Hello {first_name}! Movie Search Bot Mein Aapka Swagat Hai.**\n\n"
+            f"To access our **High-Speed Movie Library**, you must complete a quick verification step. Kripya neeche diye gaye **dono Channel aur Group** ko turant join karein. [attachment_0](attachment)\n\n"
+            f"**Please follow these steps:**\n"
+            f"1. Join our Official Channel (Compulsory)\n"
+            f"2. Join our Discussion Group (Compulsory)\n"
             f"3. Click the **'I Have Joined Both'** button below."
         )
         await message.answer(welcome_text, reply_markup=get_join_keyboard())
@@ -216,11 +219,13 @@ async def check_join_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     first_name = callback.from_user.first_name
     
-    # Callback query ko turant answer karein, taaki user ko lage ki process shuru ho gaya
+    # CRITICAL FIX: Callback query ko immediately answer karein, taaki Telegram timeout na de.
     await callback.answer("Membership check ki jaa rahi hai, kripya intezaar karein...")
     
     try:
-        if await check_user_membership(user_id):
+        is_member = await check_user_membership(user_id)
+        
+        if is_member:
             # Success Case
             active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
             success_text = (
@@ -233,13 +238,16 @@ async def check_join_callback(callback: types.CallbackQuery):
         else:
             # Failure Case
             fail_text = "❌ **Maaf Kijiye! Membership Abhi Poori Nahi Hui Hai.**\n\nKripya *dhyan se* dekhein ki aapne Channel aur Group **dono** ko join kar liya hai. Agar aapne abhi join kiya hai, to phir se **'I Have Joined Both'** button dabayein."
-            # Sirf text update karein, keyboard wahi rehne dein
+            # Message edit karein aur keyboard wahi rehne dein
             await callback.message.edit_text(fail_text, reply_markup=get_join_keyboard())
     
+    except TelegramAPIError as e:
+        # Defensive check: Agar message edit nahi ho paata (e.g., race condition), to naya message bhejein.
+        logger.warning(f"Failed to edit message in check_join_callback for user {user_id}. Sending new message. Error: {e}")
+        await bot.send_message(user_id, "⚠️ **Verification Issue:** Verification successful hone ke bawajood, message update nahi ho paya. Kripya **seedhe movie ka naam likhkar** search shuru karein.")
     except Exception as e:
-        logger.error(f"Error in check_join_callback for user {user_id}: {e}")
-        # Critical error hone par user ko inform karein
-        await callback.message.edit_text(
+        logger.error(f"Critical error in check_join_callback for user {user_id}: {e}")
+        await bot.send_message(user_id,
             "⚠️ **Technical Error:** Verification process mein rukavat aa gayi hai. Kripya thodi der baad phir koshish karein ya /start command ka upyog karein."
         )
 
@@ -256,17 +264,16 @@ async def search_movie_handler(message: types.Message):
         await message.answer("❌ **Pehle Zaroori Channels Join Karein** ❌\n\nKripya movie search karne se pehle zaroori Channel aur Group join karein aur **'I Have Joined Both'** button dabayein.", reply_markup=get_join_keyboard())
         return
 
-    # 3. Concurrency Limit Check (Zaroori: Sirf search requests ko block karein)
+    # 3. Concurrency Limit Check (Robust and Professional Message)
     if user_id != ADMIN_USER_ID:
         concurrent_users = await db.get_concurrent_user_count(minutes=ACTIVE_WINDOW_MINUTES)
         
         if concurrent_users > CONCURRENT_LIMIT:
-            # Naya professional limit message
             await message.answer(
                 f"⚠️ **Service Capacity Full: {CONCURRENT_LIMIT} User Limit Reached** ⚠️\n\n"
-                f"Dear User, our free service tier is currently operating at **maximum capacity** ({CONCURRENT_LIMIT} concurrent users). For uninterrupted service, please use one of our available **Alternate Bots** below. We apologize for the temporary inconvenience. \n"
-                f"<i>(Aapki suvidha ke liye, kripya hamare doosre bots ka upyog karein.)</i>"
-                , reply_markup=get_full_limit_keyboard()
+                f"Dear User, our free service tier is currently operating at **maximum capacity**. We apologize for the temporary delay in service.\n\n"
+                f"For uninterrupted and high-speed movie access, please use one of our available **Alternate Bots** below:",
+                reply_markup=get_full_limit_keyboard()
             )
             return
             
@@ -278,15 +285,20 @@ async def search_movie_handler(message: types.Message):
 
     searching_msg = await message.answer(f"🔍 **'{original_query}'** ki khoj jaari hai... Please wait.")
     
-    processed_query = clean_text_for_search(original_query)
-    best_results = await db.super_search_movies(processed_query, limit=20) 
+    try:
+        processed_query = clean_text_for_search(original_query)
+        best_results = await db.super_search_movies(processed_query, limit=20) 
 
-    if not best_results:
-        await searching_msg.edit_text(f"🥲 Maaf kijiye, **'{original_query}'** ke liye koi bhi perfect match nahi mila. Kripya doosra naam try karein.")
-        return
+        if not best_results:
+            await searching_msg.edit_text(f"🥲 Maaf kijiye, **'{original_query}'** ke liye koi bhi perfect match nahi mila. Kripya doosra naam try karein.")
+            return
 
-    buttons = [[InlineKeyboardButton(text=movie['title'], callback_data=f"get_{movie['imdb_id']}")] for movie in best_results]
-    await searching_msg.edit_text(f"🎬 **'{original_query}'** ke liye behtareen results. File paane ke liye chunein:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        buttons = [[InlineKeyboardButton(text=movie['title'], callback_data=f"get_{movie['imdb_id']}")] for movie in best_results]
+        await searching_msg.edit_text(f"🎬 **'{original_query}'** ke liye behtareen results. File paane ke liye chunein:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception as e:
+        logger.error(f"Search operation failed for user {user_id}. Error: {e}")
+        await searching_msg.edit_text("❌ **Internal Error:** Search system mein koi rukavat aa gayi hai. Kripya thodi der baad phir prayas karein.")
+
 
 @dp.callback_query(F.data.startswith("get_"))
 async def get_movie_callback(callback: types.CallbackQuery):
@@ -300,19 +312,21 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     try:
-        # Message ko pehle update karein, taaki user ko forward hone ka pata chale
+        # Message update karein
         await callback.message.edit_text(f"✅ **{movie['title']}** - File bheji jaa rahi hai. Kripya apne chats (Private Message) check karein.")
         
         # File forward karein
         await bot.forward_message(chat_id=callback.from_user.id, from_chat_id=int(movie['channel_id']), message_id=movie['message_id']) 
         
-    except Exception as e:
-        logger.error(f"Movie forward karne ya message edit karne mein error: {e}")
-        # Agar message edit karne mein error aaya, to naya message bhejkar inform karein
+    except TelegramAPIError as e:
+        logger.error(f"Movie forward/edit error for {imdb_id} to user {callback.from_user.id}. Error: {e}")
+        # Agar forward ya edit fail hota hai, to naya message bhejkar inform karein
         await bot.send_message(callback.from_user.id, f"❗️ **Takneeki Samasya:** Movie **{movie['title']}** ko forward karne mein koi rukavat aa gayi hai. Kripya phir se prayas karein.")
-        # Agar error message edit karne se pehle aaya, to edit failed hoga.
+    except Exception as e:
+        logger.error(f"Movie callback critical error for {imdb_id}. Error: {e}")
+        await bot.send_message(callback.from_user.id, "❌ **Critical System Error:** Request poora nahi ho paya. Kripya /start karein.")
 
-# --- Admin Commands ---
+# --- Admin Commands (No changes needed, keeping existing robustness) ---
 
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
