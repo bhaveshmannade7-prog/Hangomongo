@@ -110,14 +110,16 @@ def extract_movie_info(caption: str):
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    return "
-".join([
-        "⚠️ Capacity Reached",
-        "",
-        f"Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai aur abhi {active_users} active hain; nayi requests temporarily hold par hain.",
-        "",
+    return (
+        "⚠️ Capacity Reached
+
+"
+        f"Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai "
+        f"aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
+
+"
         "Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."
-    ])
+    )
 
 # --- Keep DB alive ---
 async def keep_db_alive():
@@ -204,36 +206,50 @@ async def start_command(message: types.Message):
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-        admin_message = "
-".join([
-            f"👑 Admin Console: @{bot_info.username}",
-            "Access Level: Full Management",
-            "",
-            "System Performance & Metrics",
-            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}",
-            f"• Total Users: {user_count:,}",
-            f"• Indexed Movies: {movie_count:,}",
-            f"• Uptime: {get_uptime()}",
-            "",
-            "Management Commands",
-            "• /stats — Real-time stats",
-            "• /broadcast — Reply to message to send",
-            "• /cleanup_users — Deactivate inactive users",
-            "• /add_movie — Reply: /add_movie imdb_id | title | year",
-            "• /rebuild_index — Recompute clean titles",
-            "• /export_csv users|movies [limit]",
-            "• /set_limit N — Change concurrency cap",
-        ])
+        admin_message = (
+            f"👑 Admin Console: @{bot_info.username}
+"
+            "Access Level: Full Management
+
+"
+            "System Performance & Metrics
+"
+            f"• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+"
+            f"• Total Users: {user_count:,}
+"
+            f"• Indexed Movies: {movie_count:,}
+"
+            f"• Uptime: {get_uptime()}
+
+"
+            "Management Commands
+"
+            "• /stats — Real-time stats
+"
+            "• /broadcast — Reply to message to send
+"
+            "• /cleanup_users — Deactivate inactive users
+"
+            "• /add_movie — Reply: /add_movie imdb_id | title | year
+"
+            "• /rebuild_index — Recompute clean titles
+"
+            "• /export_csv users|movies [limit]
+"
+            "• /set_limit N — Change concurrency cap"
+        )
         await message.answer(admin_message)
         return
 
-    welcome_text = "
-".join([
-        f"🎬 Namaskar {message.from_user.first_name}!",
-        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).",
-        "",
+    welcome_text = (
+        f"🎬 Namaskar {message.from_user.first_name}!
+"
+        "Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
+
+"
         "Hamare Channel aur Group join karne ke baad niche “I Have Joined Both” dabayen aur turant access paayen."
-    ])
+    )
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
 
 @dp.callback_query(F.data == "check_join")
@@ -245,14 +261,15 @@ async def check_join_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(overflow_message(active_users))
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
             return
-        success_text = "
-".join([
-            f"✅ Verification successful, {callback.from_user.first_name}!",
-            "",
-            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.",
-            "",
+        success_text = (
+            f"✅ Verification successful, {callback.from_user.first_name}!
+
+"
+            "Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
+
+"
             f"Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."
-        ])
+        )
         try:
             await callback.message.edit_text(success_text)
         except TelegramAPIError:
@@ -282,7 +299,9 @@ async def search_movie_handler(message: types.Message):
     try:
         top = await db.super_search_movies_advanced(original_query, limit=20)
         if not top:
-            await searching_msg.edit_text(f"🥲 Maaf kijiye, {original_query} ke liye match nahi mila; spelling/variant try karein (jaise Katara/Katra).")
+            await searching_msg.edit_text(
+                f"🥲 Maaf kijiye, {original_query} ke liye match nahi mila; spelling/variant try karein (jaise Katara/Katra)."
+            )
             return
 
         buttons = [[InlineKeyboardButton(text=movie["title"], callback_data=f"get_{movie['imdb_id']}")] for movie in top]
@@ -324,16 +343,18 @@ async def stats_command(message: types.Message):
     movie_count = await db.get_movie_count()
     concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     await message.answer(
-        "
-".join([
-            "📊 Live System Statistics",
-            "",
-            f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}",
-            f"👥 Total Users: {user_count:,}",
-            f"🎬 Indexed Movies: {movie_count:,}",
-            "⚙️ Status: Operational",
-            f"⏰ Uptime: {get_uptime()}",
-        ])
+        "📊 Live System Statistics
+
+"
+        f"🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+"
+        f"👥 Total Users: {user_count:,}
+"
+        f"🎬 Indexed Movies: {movie_count:,}
+"
+        "⚙️ Status: Operational
+"
+        f"⏰ Uptime: {get_uptime()}"
     )
 
 @dp.message(Command("broadcast"), AdminFilter())
