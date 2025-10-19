@@ -36,6 +36,32 @@ def _consonant_signature(text: str) -> str:
     t = re.sub(r's+', '', t)
     return t
 
+# --- New Synchronous Helper Function for CPU-Bound Logic ---
+def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
+    """Runs the CPU-intensive fuzzy matching in a separate thread."""
+    q_clean = clean_text_for_search(query)
+    q_cons = _consonant_signature(query)
+    tokens = q_clean.split()
+    
+    results = []
+    for imdb_id, title, clean_title in candidates:
+        s1 = fuzz.WRatio(clean_title, q_clean)
+        s2 = fuzz.token_set_ratio(title, query)
+        s3 = fuzz.partial_ratio(clean_title, q_clean)
+        s4 = fuzz.ratio(_consonant_signature(title), q_cons)
+        score = max(s1, s2, s3, s4)
+        
+        # Boost score if all query tokens are present in the clean title
+        if all(t in clean_title for t in tokens if t):
+            score = min(100, score + 5)
+        
+        results.append((score, imdb_id, title))
+
+    results.sort(key=lambda x: (-x[0], x[2]))
+    # Filter by score and limit
+    final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 55][:20]
+    return final
+
 class User(Base):
     __tablename__ = 'users'
     user_id = Column(BigInteger, primary_key=True)
@@ -300,45 +326,35 @@ class Database:
         async with self.SessionLocal() as session:
             try:
                 q_clean = clean_text_for_search(query)
-                q_norm = _normalize_for_fuzzy(query)
-                q_cons = _consonant_signature(query)
 
-                tokens = q_clean.split()
+                # Database Query (Fast I/O Operation)
                 ilike_patterns = [
-                    '%' + '%'.join(tokens) + '%' if tokens else '%',
+                    '%' + '%'.join(q_clean.split()) + '%',
                     f"%{q_clean}%",
-                    f"%{q_norm}%",
+                    f"%{_normalize_for_fuzzy(query)}%",
+                    # Consonant chunks logic is kept simple here
                 ]
-
-                cons_chunks = [q_cons[i:i+2] for i in range(0, len(q_cons), 2)] if q_cons else []
-                if cons_chunks:
-                    ilike_patterns.append('%' + '%'.join(cons_chunks) + '%')
-
                 filt = or_(*[Movie.clean_title.ilike(p) for p in ilike_patterns])
 
+                # Fetch a larger list of candidates (up to 300) to feed into the fuzzy matcher
                 res = await session.execute(
                     select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(300)
                 )
                 candidates = res.all()
                 if not candidates:
                     return []
-
-                results = []
-                for imdb_id, title, clean_title in candidates:
-                    s1 = fuzz.WRatio(clean_title, q_clean)
-                    s2 = fuzz.token_set_ratio(title, query)
-                    s3 = fuzz.partial_ratio(clean_title, q_clean)
-                    s4 = fuzz.ratio(_consonant_signature(title), q_cons)
-                    score = max(s1, s2, s3, s4)
-                    
-                    if all(t in clean_title for t in tokens if t):
-                        score = min(100, score + 5)
-                    
-                    results.append((score, imdb_id, title))
-
-                results.sort(key=lambda x: (-x[0], x[2]))
-                final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 55][:limit]
-                return final
+                
+                # CPU-Bound Fuzzy Matching (Moved to a separate thread)
+                # We are passing the candidates and the original query for processing
+                final_results = await asyncio.to_thread(
+                    _process_fuzzy_candidates, 
+                    candidates, 
+                    query
+                )
+                
+                # Limit the final results to the requested limit
+                return final_results[:limit]
+            
             except Exception as e:
                 logger.error(f"Advanced search failed: {e}")
                 return []
