@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_scop
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_
 
-from thefuzz import fuzz  # python-Levenshtein speeds it up if installed
+from thefuzz import fuzz  # python-Levenshtein accelerates if installed
 
 logger = logging.getLogger(__name__)
 Base = declarative_base()
