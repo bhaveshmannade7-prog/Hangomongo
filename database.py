@@ -39,20 +39,37 @@ def _consonant_signature(text: str) -> str:
 # --- HELPER FUNCTION TO TRANSFORM DATA (FOR JSON IMPORT) ---
 def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict:
     """
-    Generates required missing fields (imdb_id, year, message_id) for the new structure.
+    Generates required missing fields and maps input data to the Movie model structure.
+    Checks for common variations of 'title' and 'file_id'.
     """
-    title = movie_data.get("title", "Unknown Title")
-    file_id = movie_data.get("file_id", "NO_FILE_ID")
     
-    # 1. IMDB ID (Using a hash of title+file_id to ensure near-uniqueness)
+    # 1. Map Title (Prioritize 'title', then try common alternatives)
+    title = movie_data.get("title")
+    if not title:
+        title = movie_data.get("name")
+    if not title:
+        title = movie_data.get("movie_name")
+
+    # 2. Map File ID (Prioritize 'file_id', then try common alternatives)
+    file_id = movie_data.get("file_id")
+    if not file_id:
+        file_id = movie_data.get("file_ref")
+    if not file_id:
+        file_id = movie_data.get("media_id")
+
+    if not title or not file_id:
+        logger.warning(f"Skipping import: Title or File ID missing after mapping attempts: {movie_data}")
+        return None
+
+    # 3. IMDB ID (Using a hash of title+file_id to ensure near-uniqueness)
     hash_object = hashlib.sha1(f"{title}{file_id}".encode('utf-8'))
     auto_imdb_id = f"auto_{hash_object.hexdigest()[:15]}" 
 
-    # 2. Year (Attempt to extract year from title)
+    # 4. Year (Attempt to extract year from title)
     year_match = re.search(r'\b(19|20)\d{2}\b', title)
     year = year_match.group(0) if year_match else None
 
-    # 3. Message ID (Using a large placeholder)
+    # 5. Message ID (Using a large placeholder, assuming import is from unindexed files)
     auto_message_id = 9999999999999  
 
     return {
@@ -115,25 +132,28 @@ class Movie(Base):
 class Database:
     def __init__(self, database_url: str):
         connect_args = {}
-        # FIX: Added proper SSL handling for Render's PostgreSQL connection
-        if 'sslmode=require' in database_url or database_url.startswith('postgres'):
-            connect_args['ssl'] = 'require'
-            database_url = database_url.replace('?sslmode=require', '').replace('?sslmode=required', '')
-
-        if database_url.startswith('postgresql://'):
-            database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
-        elif database_url.startswith('postgres://'):
-            database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
+        
+        # CRITICAL FIX 1: Connection Stability for Render/Neon PostgreSQL
+        if database_url.startswith('postgres'):
+            if database_url.startswith('postgres://'):
+                database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
+            elif database_url.startswith('postgresql://'):
+                database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
+                
+            if 'sslmode=require' in database_url or 'sslmode=required' in database_url:
+                connect_args['ssl'] = 'require'
+                database_url = database_url.split('?')[0] # Remove query params
 
         self.engine = create_async_engine(
             database_url, 
             echo=False, 
             connect_args=connect_args,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,
-            pool_recycle=3600,
-            pool_timeout=30,
+            # HIGH-RESILIENCE settings for Render/Neon Free Tier
+            pool_size=10, 
+            max_overflow=20, 
+            pool_pre_ping=True, 
+            pool_recycle=300, # Recycle every 5 minutes
+            pool_timeout=15, 
         )
         
         self.SessionLocal = sessionmaker(
@@ -141,7 +161,7 @@ class Database:
             expire_on_commit=False, 
             class_=AsyncSession
         )
-        logger.info("Database engine initialized with proper pooling.")
+        logger.info("Database engine initialized with HIGH-RESILIENCE pooling settings.")
 
     async def init_db(self):
         async with self.engine.begin() as conn:
@@ -162,7 +182,12 @@ class Database:
                     if not column_exists:
                         logger.warning("Applying manual migration: Adding 'clean_title' column.")
                         await conn.execute(text("ALTER TABLE movies ADD COLUMN clean_title VARCHAR"))
-                        await conn.execute(text("UPDATE movies SET clean_title = lower(regexp_replace(title, '[^a-z0-9\\s]+', ' ', 'g'))"))
+                        update_query = text("""
+                            UPDATE movies 
+                            SET clean_title = lower(regexp_replace(title, '[^a-z0-9\s]+', ' ', 'g'))
+                            WHERE clean_title IS NULL OR clean_title = ''
+                        """)
+                        await conn.execute(update_query)
                         await conn.execute(text("ALTER TABLE movies ALTER COLUMN clean_title SET NOT NULL"))
                         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movies_clean_title ON movies (clean_title)"))
                         await conn.commit()
@@ -180,12 +205,15 @@ class Database:
                 if user:
                     user.last_active = datetime.utcnow()
                     user.is_active = True
+                    user.username = username
+                    user.first_name = first_name
+                    user.last_name = last_name
                 else:
                     session.add(User(user_id=user_id, username=username, first_name=first_name, last_name=last_name))
                 await session.commit()
             except Exception as e:
                 await session.rollback()
-                logger.error(f"add_user error: {e}")
+                logger.error(f"add_user error: {e}", exc_info=True)
 
     async def get_concurrent_user_count(self, minutes: int = 5):
         async with self.SessionLocal() as session:
@@ -196,7 +224,7 @@ class Database:
                 )
                 return result.scalar_one()
             except Exception as e:
-                logger.error(f"get_concurrent_user_count error: {e}")
+                logger.error(f"get_concurrent_user_count error: {e}", exc_info=True)
                 return 0
 
     async def get_all_users(self):
@@ -205,17 +233,16 @@ class Database:
                 result = await session.execute(select(User.user_id).filter(User.is_active == True))
                 return result.scalars().all()
             except Exception as e:
-                logger.error(f"get_all_users error: {e}")
+                logger.error(f"get_all_users error: {e}", exc_info=True)
                 return []
 
     async def get_user_count(self):
         async with self.SessionLocal() as session:
             try:
-                # 🛑 FIX: Changed from User.id to User.user_id 
                 result = await session.execute(select(func.count(User.user_id))) 
                 return result.scalar_one()
             except Exception as e:
-                logger.error(f"get_user_count error: {e}")
+                logger.error(f"get_user_count error: {e}", exc_info=True)
                 return 0
 
     async def cleanup_inactive_users(self, days: int):
@@ -230,7 +257,7 @@ class Database:
                 return len(users_to_update)
             except Exception as e:
                 await session.rollback()
-                logger.error(f"cleanup_inactive_users error: {e}")
+                logger.error(f"cleanup_inactive_users error: {e}", exc_info=True)
                 return 0
 
     async def add_movie(self, imdb_id, title, year, file_id, message_id, channel_id):
@@ -245,33 +272,30 @@ class Database:
                 await session.commit()
                 return True
             except Exception as e:
-                logger.error(f"Movie add error: {e}")
+                logger.error(f"Movie add error: {e}", exc_info=True)
                 await session.rollback()
                 return False
 
     async def bulk_add_new_movies(self, movies_data: List[Dict], channel_id: int):
-        """
-        Processes and adds a list of movies from the simple (title, file_id) structure.
-        Generates auto fields (imdb_id, message_id, year).
-        """
         added_count = 0
         skipped_count = 0
         
         async with self.SessionLocal() as session:
             for new_movie in movies_data:
                 try:
-                    # Transform the simple data to the required complex structure
                     transformed_data = generate_auto_info(new_movie, channel_id)
                     
-                    # Check if an entry with this auto-generated imdb_id already exists
+                    if not transformed_data:
+                        skipped_count += 1
+                        continue 
+                        
                     result = await session.execute(
                         select(Movie.id).filter(Movie.imdb_id == transformed_data['imdb_id'])
                     )
                     if result.scalar_one_or_none():
                         skipped_count += 1
-                        continue # Skip if already exists
+                        continue 
                         
-                    # Prepare the data for insertion
                     clean_title = clean_text_for_search(transformed_data['title'])
                     
                     new_movie_entry = Movie(
@@ -288,16 +312,14 @@ class Database:
                     added_count += 1
                     
                 except Exception as e:
-                    logger.error(f"Error processing new movie data: {new_movie}. Error: {e}")
-                    # Continue to the next entry even if one fails
-            
-            # Commit all processed entries at the end of the batch
+                    logger.error(f"Error processing new movie data: {new_movie}. Error: {e}", exc_info=True)
+                    
             if added_count > 0:
                 try:
                     await session.commit()
                 except Exception as e:
                     await session.rollback()
-                    logger.error(f"Bulk commit failed: {e}")
+                    logger.error(f"Bulk commit failed: {e}", exc_info=True)
             
         return added_count, skipped_count
 
@@ -308,7 +330,7 @@ class Database:
                 result = await session.execute(select(func.count(Movie.id)))
                 return result.scalar_one()
             except Exception as e:
-                logger.error(f"get_movie_count error: {e}")
+                logger.error(f"get_movie_count error: {e}", exc_info=True)
                 return 0
 
     async def get_movie_by_imdb(self, imdb_id: str):
@@ -327,7 +349,7 @@ class Database:
                     }
                 return None
             except Exception as e:
-                logger.error(f"get_movie_by_imdb error: {e}")
+                logger.error(f"get_movie_by_imdb error: {e}", exc_info=True)
                 return None
 
     async def export_users(self, limit: int = 2000) -> List[Dict]:
@@ -351,7 +373,7 @@ class Database:
                     for r in rows
                 ]
             except Exception as e:
-                logger.error(f"export_users error: {e}")
+                logger.error(f"export_users error: {e}", exc_info=True)
                 return []
 
     async def export_movies(self, limit: int = 2000) -> List[Dict]:
@@ -374,7 +396,7 @@ class Database:
                     for r in rows
                 ]
             except Exception as e:
-                logger.error(f"export_movies error: {e}")
+                logger.error(f"export_movies error: {e}", exc_info=True)
                 return []
 
     async def rebuild_clean_titles(self) -> Tuple[int, int]:
@@ -400,7 +422,7 @@ class Database:
                     offset += batch
                 return updated, total
             except Exception as e:
-                logger.error(f"Rebuild index failed: {e}")
+                logger.error(f"Rebuild index failed: {e}", exc_info=True)
                 await session.rollback()
                 return 0, total
 
@@ -412,24 +434,18 @@ class Database:
                 
                 # --- Optimized DB Query Filters ---
                 db_filters = [
-                    # 1. Exact clean title match (fastest)
                     Movie.clean_title == q_clean,
-                    # 2. Starts with clean query (index-friendly if database supports it)
                     Movie.clean_title.ilike(f"{q_clean}%"),
-                    # 3. Full match on the clean query (only for a single phrase)
                     Movie.clean_title.ilike(f"%{q_clean}%"),
                 ]
 
-                # If query has multiple words, try matching them separated by wildcards (less aggressive than before)
                 if len(q_clean.split()) > 1:
                     db_filters.append(
                         Movie.clean_title.ilike('%' + '%'.join(q_clean.split()) + '%')
                     )
 
-                # Combine filters using OR
                 filt = or_(*db_filters)
                 
-                # Fetch maximum 100 candidates from the database
                 res = await session.execute(
                     select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(100)
                 )
@@ -437,16 +453,14 @@ class Database:
                 if not candidates:
                     return []
                 
-                # CPU-Bound Fuzzy Matching (Still offloaded to a separate thread)
                 final_results = await asyncio.to_thread(
                     _process_fuzzy_candidates, 
                     candidates, 
                     query
                 )
                 
-                # Limit the final results to the requested limit
                 return final_results[:limit]
             
             except Exception as e:
-                logger.error(f"Advanced search failed: {e}")
+                logger.error(f"Advanced search failed: {e}", exc_info=True)
                 return []
