@@ -3,8 +3,8 @@ import os
 import asyncio
 import logging
 import re
-import json # <--- NEW IMPORT
-import io # <--- NEW IMPORT
+import json 
+import io 
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Dict
@@ -23,12 +23,12 @@ from database import Database, clean_text_for_search
 
 # --- Configuration ---
 load_dotenv()
-# IMPORTANT: Setting logging level to DEBUG to capture detailed information
+# Setting logging to INFO to balance debugging and resource use on Free Tier
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "7263519581"))
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "123456789")) 
 LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", "-1003138949015"))
 JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
@@ -45,7 +45,7 @@ CURRENT_CONC_LIMIT = DEFAULT_CONCURRENT_LIMIT
 ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
 if not BOT_TOKEN or not DATABASE_URL:
-    logger.critical("Missing BOT_TOKEN or DATABASE_URL!")
+    logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
     raise SystemExit(1)
 
 def build_webhook_url() -> str:
@@ -81,8 +81,6 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
-    # NOTE: This function currently always returns True.
-    # In a real bot, you'd add logic here to check if the user is a member of required channels/groups.
     return True 
 
 def get_join_keyboard():
@@ -103,41 +101,44 @@ def extract_movie_info(caption: str):
     lines = caption.splitlines()
     if lines:
         title = lines[0].strip()
-        if len(lines) > 1 and re.search(r"Sd{1,2}", lines[1], re.IGNORECASE):
+        if len(lines) > 1 and re.search(r"S\d{1,2}", lines[1], re.IGNORECASE):
             title += " " + lines[1].strip()
         info["title"] = title
-    imdb_match = re.search(r"(ttd{7,})", caption)
+    imdb_match = re.search(r"(tt\d{7,})", caption)
     if imdb_match:
         info["imdb_id"] = imdb_match.group(1)
-    year_match = re.search(r"\b(19|20)d{2}\b", caption)
+    year_match = re.search(r"\b(19|20)\d{2}\b", caption)
     if year_match:
         info["year"] = year_match.group(0)
     return info if "title" in info else None
 
 def overflow_message(active_users: int) -> str:
-    # FIXED: SyntaxError 1
-    msg = f"""⚠️ Capacity Reached
+    msg = f"""⚠️ <b>Capacity Reached</b>
 
-Hamari free-tier service is waqt {CURRENT_CONC_LIMIT} concurrent users par chal rahi hai 
-aur abhi {active_users} active hain; nayi requests temporarily hold par hain.
+Hamari free-tier service is waqt <b>{CURRENT_CONC_LIMIT}</b> concurrent users par chal rahi hai 
+aur abhi <b>{active_users}</b> active hain; nayi requests temporarily hold par hain.
 
 Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
     return msg
 
 # --- Keep DB alive ---
 async def keep_db_alive():
+    """Keeps the database connection pool active by running a lightweight query."""
     while True:
+        # Reduced from 240s to 180s to maintain activity on Free Tier
+        await asyncio.sleep(180) 
         try:
-            await db.get_user_count()
+            await db.get_user_count() 
+            logger.debug("DB keepalive successful.")
         except Exception as e:
-            logger.error(f"DB keepalive failed: {e}")
-        await asyncio.sleep(240)
+            logger.error(f"DB keepalive failed: {e}", exc_info=True)
+
 
 # --- Lifespan management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
-    db_task = asyncio.create_task(keep_db_alive())
+    db_task = asyncio.create_task(keep_db_alive()) 
 
     if WEBHOOK_URL:
         try:
@@ -151,7 +152,7 @@ async def lifespan(app: FastAPI):
                 )
                 logger.info(f"Webhook set to {WEBHOOK_URL}")
         except Exception as e:
-            logger.error(f"Webhook setup error: {e}")
+            logger.error(f"Webhook setup error: {e}", exc_info=True)
     else:
         logger.warning("WEBHOOK_URL is empty; public URL required.")
 
@@ -159,14 +160,16 @@ async def lifespan(app: FastAPI):
 
     db_task.cancel()
     try:
+        await asyncio.sleep(2) 
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
-        logger.error(f"Webhook delete error: {e}")
+        logger.error(f"Webhook delete error: {e}", exc_info=True)
 
 app = FastAPI(lifespan=lifespan)
 
 async def _process_update(u: Update):
     try:
+        # Pass update to dispatcher
         await dp.feed_update(bot=bot, update=u)
     except Exception as e:
         logger.exception(f"feed_update failed: {e}")
@@ -180,26 +183,35 @@ async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: 
                 raise HTTPException(status_code=403, detail="Forbidden")
         
         telegram_update = Update(**update)
-        background_tasks.add_task(_process_update, telegram_update)
+        # Use add_task for non-blocking processing
+        background_tasks.add_task(_process_update, telegram_update) 
         return {"ok": True}
     except Exception as e:
-        logger.error(f"Webhook processing error: {e}")
+        logger.error(f"Webhook processing error: {e}", exc_info=True)
         return {"ok": False}
 
 @app.get("/")
 async def ping():
     return {"status": "ok", "service": "Movie Bot is Live", "uptime": get_uptime()}
 
-# --- Concurrency gate ---
+# --- Concurrency gate (Most important for Free Tier stability) ---
 async def ensure_capacity_or_inform(message: types.Message) -> bool:
-    if message.from_user.id == ADMIN_USER_ID:
+    """Checks capacity, updates user's last_active time, and enforces limit."""
+    user_id = message.from_user.id
+    
+    # 1. Update activity (crucial for concurrency count)
+    await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+
+    # 2. Always allow admin
+    if user_id == ADMIN_USER_ID:
         return True
+    
+    # 3. Check Capacity
     active = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-    if active >= CURRENT_CONC_LIMIT:
+    if active > CURRENT_CONC_LIMIT: 
         await message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard())
         return False
-    # Update user's last_active time
-    await db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+        
     return True
 
 # --- Handlers ---
@@ -208,28 +220,22 @@ async def start_command(message: types.Message):
     user_id = message.from_user.id
     bot_info = await bot.get_me()
 
-    # Ensure user is added/updated before capacity check
-    await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
-
-    if not await ensure_capacity_or_inform(message):
-        return
-
     if user_id == ADMIN_USER_ID:
+        await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
         user_count = await db.get_user_count()
         movie_count = await db.get_movie_count()
         concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
         
-        # FIXED: SyntaxError 2
-        admin_message = f"""👑 Admin Console: @{bot_info.username}
+        admin_message = f"""👑 <b>Admin Console: @{bot_info.username}</b>
 Access Level: Full Management
 
-System Performance & Metrics
-• Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
+<b>System Performance & Metrics</b>
+• Active Users (5m): {concurrent_users:,}/<b>{CURRENT_CONC_LIMIT}</b>
 • Total Users: {user_count:,}
 • Indexed Movies: {movie_count:,}
 • Uptime: {get_uptime()}
 
-Management Commands
+<b>Management Commands</b>
 • /stats — Real-time stats
 • /broadcast — Reply to message to send
 • /cleanup_users — Deactivate inactive users
@@ -242,47 +248,65 @@ Management Commands
         await message.answer(admin_message)
         return
 
-    # FIXED: SyntaxError 3
-    welcome_text = f"""🎬 Namaskar {message.from_user.first_name}!
+    if not await ensure_capacity_or_inform(message):
+        return
 
-Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise Kantara 2022).
+    welcome_text = f"""🎬 Namaskar <b>{message.from_user.first_name}</b>!
 
-Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen."""
+Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke liye saal bhi likh sakte hain (jaise <b>Kantara 2022</b>).
+
+Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen.
+Aap help ke liye /help command bhi use kar sakte hain."""
     
     await message.answer(welcome_text, reply_markup=get_join_keyboard())
+
+@dp.message(Command("help"))
+async def help_command(message: types.Message):
+    await db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+    
+    help_text = """❓ <b>Bot Ka Upyog Kaise Karein</b>
+
+1.  <b>Search Karein:</b> Movie/Show ka naam seedha message mein bhejein. (Example: <code>Jawan</code> ya <code>Mirzapur Season 1</code>)
+2.  <b>Behtar Results:</b> Naam ke saath saal (year) zaroor jodein. (Example: <code>Pushpa 2021</code>)
+3.  <b>Bot Rukne Par:</b> Agar bot kuch der baad response dena band kar de, toh iska matlab hai ki server so gaya hai. Kripya **thoda intezar** karein ya bot ko dobara /start karein.
+    
+Agar Bot slow ho ya ruk jaaye, toh <b>Alternate Bots</b> use karein jo /start karne par dikhte hain."""
+    
+    await message.answer(help_text)
+
 
 @dp.callback_query(F.data == "check_join")
 async def check_join_callback(callback: types.CallbackQuery):
     await callback.answer("Verifying…")
-    try:
-        active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
-        if active_users >= CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
-            # Re-fetch active_users just in case it changed slightly
-            await callback.message.edit_text(overflow_message(await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)))
+    
+    # Update user activity and check capacity
+    active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
+    if active_users > CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
+        try:
+            await callback.message.edit_text(overflow_message(active_users))
             await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
-            return
+        except Exception:
+            pass 
+        return
             
-        # FIXED: SyntaxError 4
-        success_text = f"""✅ Verification successful, {callback.from_user.first_name}!
+    success_text = f"""✅ Verification successful, <b>{callback.from_user.first_name}</b>!
 
 Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
 
 Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."""
         
-        try:
-            await callback.message.edit_text(success_text)
-        except TelegramAPIError:
-            # Handle case where message is too old to edit
-            await bot.send_message(callback.from_user.id, success_text)
+    try:
+        await callback.message.edit_text(success_text, reply_markup=None)
+    except TelegramAPIError:
+        await bot.send_message(callback.from_user.id, success_text, reply_markup=None)
             
     except Exception as e:
-        logger.error(f"check_join error: {e}")
+        logger.error(f"check_join error: {e}", exc_info=True)
         await bot.send_message(callback.from_user.id, "⚠️ Technical error aya, kripya /start karein aur dobara koshish karein.")
 
 @dp.message(F.text & ~F.text.startswith("/") & (F.chat.type == "private"))
 async def search_movie_handler(message: types.Message):
     user_id = message.from_user.id
-    # Note: User update is now also inside ensure_capacity_or_inform
 
     if not await check_user_membership(user_id):
         await message.answer("⚠️ Kripya pehle Channel aur Group join karein, phir se /start dabayen.", reply_markup=get_join_keyboard())
@@ -296,31 +320,26 @@ async def search_movie_handler(message: types.Message):
         await message.answer("🤔 Kripya kam se kam 2 characters ka query bhejein.")
         return
 
-    searching_msg = await message.answer(f"🔍 {original_query} ki khoj jaari hai…")
-    # --- Logging added for diagnosis ---
-    logger.info(f"USER_SEARCH_FLOW_1: User {user_id} querying '{original_query}'. Starting DB call.")
-
+    searching_msg = await message.answer(f"🔍 <b>{original_query}</b> ki khoj jaari hai…")
+    
     try:
+        # Reduced timeout to 10.0s for better responsiveness on Free Tier
         top = await asyncio.wait_for(
             db.super_search_movies_advanced(original_query, limit=20),
-            timeout=10.0 # Reducing timeout slightly from 20s to 10s for better responsiveness
+            timeout=10.0 
         )
-        # --- Logging added for diagnosis ---
-        logger.info(f"USER_SEARCH_FLOW_2: DB call successful. Query '{original_query}' returned {len(top)} results. Preparing response.")
         
         if not top:
             await searching_msg.edit_text(
-                f"🥲 Maaf kijiye, {original_query} ke liye match nahi mila; spelling/variant try karein (jaise Katara/Katra)."
+                f"🥲 Maaf kijiye, <b>{original_query}</b> ke liye match nahi mila; spelling/variant try karein (jaise Katara/Katra)."
             )
             return
 
         buttons = [[InlineKeyboardButton(text=movie["title"], callback_data=f"get_{movie['imdb_id']}")] for movie in top]
         await searching_msg.edit_text(
-            f"🎬 {original_query} ke liye {len(top)} results mile — file paane ke liye chunein:",
+            f"🎬 <b>{original_query}</b> ke liye {len(top)} results mile — file paane ke liye chunein:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
-        # --- Logging added for diagnosis ---
-        logger.info(f"USER_SEARCH_FLOW_3: Response successfully sent for '{original_query}'.")
         
     except asyncio.TimeoutError:
         logger.warning(f"Search timed out for query: {original_query}")
@@ -330,7 +349,7 @@ async def search_movie_handler(message: types.Message):
             pass
             
     except Exception as e:
-        logger.error(f"Search error for '{original_query}': {e}", exc_info=True) # exc_info=True will print traceback
+        logger.error(f"Search error for '{original_query}': {e}", exc_info=True) 
         try:
             await searching_msg.edit_text("❌ Internal error: search system me rukavat aa gayi hai, kuch der baad koshish karein.")
         except TelegramAPIError:
@@ -338,12 +357,10 @@ async def search_movie_handler(message: types.Message):
 
 @dp.callback_query(F.data.startswith("get_"))
 async def get_movie_callback(callback: types.CallbackQuery):
-    await callback.answer("File forward ki ja रही है…")
+    await callback.answer("File forward ki ja rahi hai…")
     imdb_id = callback.data.split("_", 1)[1]
     
-    # Check capacity again before file forward
     if not await ensure_capacity_or_inform(callback.message):
-        # We don't want to double message, ensure_capacity_or_inform sends the overflow message
         return
         
     movie = await db.get_movie_by_imdb(imdb_id)
@@ -352,8 +369,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     try:
-        # Edit the message to show processing status
-        await callback.message.edit_text(f"✅ {movie['title']} — file bheji ja rahi hai, kripya chat check karein.")
+        await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
         
         await bot.forward_message(
             chat_id=callback.from_user.id,
@@ -362,11 +378,11 @@ async def get_movie_callback(callback: types.CallbackQuery):
         )
         
     except TelegramAPIError as e:
-        logger.error(f"Forward/edit error for {imdb_id}: {e}")
-        await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: {movie['title']} ko forward karne me dikat aayi, kripya phir से try karein.")
+        logger.error(f"Forward/edit error for {imdb_id}: {e}", exc_info=True)
+        await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward karne me dikat aayi, kripya phir से try karein.")
         
     except Exception as e:
-        logger.error(f"Movie callback critical error: {e}")
+        logger.error(f"Movie callback critical error: {e}", exc_info=True)
         await bot.send_message(callback.from_user.id, "❌ Critical system error: kripya /start karein.")
 
 # --- Admin Commands ---
@@ -377,8 +393,7 @@ async def stats_command(message: types.Message):
     movie_count = await db.get_movie_count()
     concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     
-    # FIXED: SyntaxError 5
-    stats_msg = f"""📊 Live System Statistics
+    stats_msg = f"""📊 <b>Live System Statistics</b>
 
 🟢 Active Users (5m): {concurrent_users:,}/{CURRENT_CONC_LIMIT}
 👥 Total Users: {user_count:,}
@@ -397,29 +412,28 @@ async def broadcast_command(message: types.Message):
     total_users = len(users)
     success, failed = 0, 0
     
-    progress_msg = await message.answer(f"📤 Broadcasting to {total_users} users…")
+    progress_msg = await message.answer(f"📤 Broadcasting to <b>{total_users}</b> users…")
     
     try:
         for uid in users:
             try:
                 await message.reply_to_message.copy_to(uid)
                 success += 1
-            except Exception:
+            except Exception as e:
                 failed += 1
+                logger.debug(f"Broadcast failed for user {uid}: {e}")
             if (success + failed) % 100 == 0 and (success + failed) > 0:
-                # FIXED: SyntaxError 6
                 await progress_msg.edit_text(f"""📤 Broadcasting…
 ✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}""")
             await asyncio.sleep(0.05) 
             
-        # FIXED: SyntaxError 7
-        await progress_msg.edit_text(f"""✅ Broadcast Complete!
+        await progress_msg.edit_text(f"""✅ <b>Broadcast Complete!</b>
 
 • Success: {success}
 • Failed: {failed}""")
         
     except Exception as e:
-        logger.error(f"Broadcast failed: {e}")
+        logger.error(f"Broadcast failed: {e}", exc_info=True)
         await message.answer("❌ Broadcasting process mein rukawat aa gayi.")
 
 @dp.message(Command("cleanup_users"), AdminFilter())
@@ -428,8 +442,7 @@ async def cleanup_users_command(message: types.Message):
     removed_count = await db.cleanup_inactive_users(days=30)
     new_count = await db.get_user_count()
     
-    # FIXED: SyntaxError 8 (Current Error was here)
-    await message.answer(f"""✅ Cleanup complete!
+    await message.answer(f"""✅ <b>Cleanup complete!</b>
 • Deactivated: {removed_count}
 • Active Users now: {new_count}""")
 
@@ -459,11 +472,10 @@ async def add_movie_command(message: types.Message):
         file_id=file_id, message_id=message.reply_to_message.message_id, channel_id=message.reply_to_message.chat.id
     )
     if success:
-        await message.answer(f"✅ Movie '{title}' add ho gayi hai.")
+        await message.answer(f"✅ Movie '<b>{title}</b>' add ho gayi hai.")
     else:
         await message.answer("❌ Movie add karne me error aaya.")
 
-# --- NEW ADMIN COMMAND FOR JSON IMPORT ---
 @dp.message(Command("import_json_movies"), AdminFilter())
 async def import_json_movies_command(message: types.Message):
     """Admin command to import movie data from a JSON file reply."""
@@ -478,37 +490,32 @@ async def import_json_movies_command(message: types.Message):
         
     try:
         target_channel_id = int(args[1])
-        if target_channel_id > 0: # Ensure it's a negative chat ID for channels
+        if target_channel_id > 0: 
              await message.answer("❌ Channel ID galat hai, yeh hamesha negative (-100...) hota hai.")
              return
     except ValueError:
         await message.answer("❌ Channel ID number hona chahiye.")
         return
 
-    # Download the JSON file
     file_id = message.reply_to_message.document.file_id
     file_info = await bot.get_file(file_id)
     file_path = file_info.file_path
     
-    # Download the file content
     file_content = io.BytesIO()
     await bot.download_file(file_path, file_content)
     file_content.seek(0)
 
     try:
-        # Load the JSON data
         movie_list = json.load(file_content)
-        # Validate structure (checking for the minimum required fields)
-        if not isinstance(movie_list, list) or not all('title' in m and 'file_id' in m for m in movie_list):
-            await message.answer("❌ JSON format galat hai. Expected: [{\"title\": \"...\", \"file_id\": \"...\"}, ...]")
+        if not isinstance(movie_list, list) or not (len(movie_list) > 0 and isinstance(movie_list[0], dict)):
+            await message.answer("❌ JSON format galat hai. Expected: List of JSON Objects ([{}, {}, ...]).")
             return
             
-        await message.answer(f"⏳ {len(movie_list)} entries process ho rahi hain. Kripya intezaar karein.")
+        await message.answer(f"⏳ <b>{len(movie_list)}</b> entries process ho rahi hain. Kripya intezaar karein.")
         
-        # Call the new bulk function
         added_count, skipped_count = await db.bulk_add_new_movies(movie_list, target_channel_id)
 
-        await message.answer(f"""✅ Import Complete!
+        await message.answer(f"""✅ <b>Import Complete!</b>
 • Successfully Added: {added_count}
 • Already Exists (Skipped): {skipped_count}
 • Total Processed: {len(movie_list)}""")
@@ -516,15 +523,15 @@ async def import_json_movies_command(message: types.Message):
     except json.JSONDecodeError:
         await message.answer("❌ Uploaded file valid JSON format mein nahi hai.")
     except Exception as e:
-        logger.error(f"Import JSON failed: {e}")
-        await message.answer(f"❌ Internal error while processing: {type(e).__name__}")
+        logger.error(f"Import JSON failed: {e}", exc_info=True)
+        await message.answer(f"❌ Internal error while processing: {type(e).__name__}. Check logs for details.")
 
 
 @dp.message(Command("rebuild_index"), AdminFilter())
 async def rebuild_index_command(message: types.Message):
     await message.answer("🔧 Clean titles reindex ho रहे हैं… yeh operation batched hai.")
     updated, total = await db.rebuild_clean_titles()
-    await message.answer(f"✅ Reindex complete: Updated {updated} of ~{total} titles. Ab search feature tez aur sahi kaam karega.")
+    await message.answer(f"✅ Reindex complete: Updated <b>{updated}</b> of ~{total} titles. Ab search feature tez aur sahi kaam karega.")
 
 @dp.message(Command("export_csv"), AdminFilter())
 async def export_csv_command(message: types.Message):
@@ -537,9 +544,7 @@ async def export_csv_command(message: types.Message):
     try:
         if kind == "users":
             rows = await db.export_users(limit=limit)
-            # FIX: Changed to triple quotes to handle newlines correctly
-            header = """user_id,username,first_name,last_name,joined_date,last_active,is_active
-"""
+            header = """user_id,username,first_name,last_name,joined_date,last_active,is_active\n"""
             csv = header + "\n".join([
                 f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
                 for r in rows
@@ -547,9 +552,7 @@ async def export_csv_command(message: types.Message):
             await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="users.csv"), caption="Users export")
         else:
             rows = await db.export_movies(limit=limit)
-            # FIX: Changed to triple quotes to handle newlines correctly
-            header = """imdb_id,title,year,channel_id,message_id,added_date
-"""
+            header = """imdb_id,title,year,channel_id,message_id,added_date\n"""
             csv = header + "\n".join([
                 f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
                 for r in rows
@@ -557,7 +560,7 @@ async def export_csv_command(message: types.Message):
             await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="movies.csv"), caption="Movies export")
             
     except Exception as e:
-        logger.error(f"Export CSV failed: {e}")
+        logger.error(f"Export CSV failed: {e}", exc_info=True)
         await message.answer("❌ Data export karne me internal error aaya.")
 
 @dp.message(Command("set_limit"), AdminFilter())
@@ -572,7 +575,7 @@ async def set_limit_command(message: types.Message):
         await message.answer("Allowed range: 5–100 for safety on free tier.")
         return
     CURRENT_CONC_LIMIT = val
-    await message.answer(f"✅ Concurrency limit set to {CURRENT_CONC_LIMIT}")
+    await message.answer(f"✅ Concurrency limit set to <b>{CURRENT_CONC_LIMIT}</b>")
 
 @dp.channel_post()
 async def auto_index_handler(message: types.Message):
@@ -583,11 +586,15 @@ async def auto_index_handler(message: types.Message):
     if not movie_info:
         logger.warning(f"Auto-index skipped: could not parse caption: {caption[:80]}")
         return
+    
     file_id = message.video.file_id if message.video else message.document.file_id
-    imdb_id = movie_info.get("imdb_id", f"auto_{message.message_id}")
+    
+    imdb_id = movie_info.get("imdb_id", f"auto_{message.message_id}") 
+    
     if await db.get_movie_by_imdb(imdb_id):
         logger.info(f"Movie already indexed: {movie_info.get('title')}")
         return
+        
     success = await db.add_movie(
         imdb_id=imdb_id,
         title=movie_info.get("title"),
