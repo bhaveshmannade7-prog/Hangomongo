@@ -23,7 +23,7 @@ from database import Database, clean_text_for_search
 
 # --- Configuration ---
 load_dotenv()
-# Setting logging to INFO to balance debugging and resource use on Free Tier
+# Setting logging to INFO to balance debugging and resource use on Free Tie
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bot")
 
