@@ -1,7 +1,7 @@
 import logging
 import re
 import asyncio
-import hashlib # <--- NEW IMPORT
+import hashlib
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 
@@ -36,7 +36,7 @@ def _consonant_signature(text: str) -> str:
     t = re.sub(r's+', '', t)
     return t
 
-# --- NEW HELPER FUNCTION TO TRANSFORM DATA ---
+# --- HELPER FUNCTION TO TRANSFORM DATA (FOR JSON IMPORT) ---
 def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict:
     """
     Generates required missing fields (imdb_id, year, message_id) for the new structure.
@@ -64,7 +64,7 @@ def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict:
         "channel_id": channel_id,
     }
 
-# --- New Synchronous Helper Function for CPU-Bound Logic ---
+# --- Synchronous Helper Function for CPU-Bound Logic ---
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
     """Runs the CPU-intensive fuzzy matching in a separate thread."""
     q_clean = clean_text_for_search(query)
@@ -211,7 +211,8 @@ class Database:
     async def get_user_count(self):
         async with self.SessionLocal() as session:
             try:
-                result = await session.execute(select(func.count(User.id)))
+                # 🛑 FIX: Changed from User.id to User.user_id 
+                result = await session.execute(select(func.count(User.user_id))) 
                 return result.scalar_one()
             except Exception as e:
                 logger.error(f"get_user_count error: {e}")
@@ -248,7 +249,6 @@ class Database:
                 await session.rollback()
                 return False
 
-    # --- NEW FUNCTION TO HANDLE NEW JSON STRUCTURE ---
     async def bulk_add_new_movies(self, movies_data: List[Dict], channel_id: int):
         """
         Processes and adds a list of movies from the simple (title, file_id) structure.
