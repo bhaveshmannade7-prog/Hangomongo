@@ -13,7 +13,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest # TelegramBadRequest import kiya gaya
+# FIX: TelegramBadRequest import kiya gaya
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest 
 from aiogram.client.default import DefaultBotProperties
 
 from dotenv import load_dotenv
@@ -374,32 +375,37 @@ async def get_movie_callback(callback: types.CallbackQuery):
             
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
             
-            # CRITICAL FIX: send_document has issues with certain file_ids.
-            # We add a secondary attempt (try-except) to handle Bad Request errors 
-            # by using the document property directly which is often more robust for media.
+            # CRITICAL FIX: send_copy is the most robust method for file_id references 
+            # (which are not original message IDs)
             try:
-                # Attempt 1: send_document using file_id (standard method)
-                await bot.send_document(
+                # Attempt 1: Use send_copy with the file_id (preferred fallback)
+                await bot.send_copy(
                     chat_id=callback.from_user.id,
-                    document=movie["file_id"], 
+                    from_chat_id=int(movie["channel_id"]),
+                    message_id=movie["message_id"], # Although placeholder, some Telegram clients might resolve it internally
                     caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
                 )
-            except TelegramBadRequest as e:
-                # Fallback on Bad Request error: Telegram usually fails because 
-                # the 'file_id' provided is actually a 'file_unique_id' or has expired.
-                logger.warning(f"send_document failed for {imdb_id}. Attempting send_video/document with file_id fallback.")
+            except TelegramAPIError as copy_e:
+                # Fallback to direct media send if send_copy fails (wrong message_id)
+                logger.warning(f"send_copy failed for {imdb_id}. Attempting direct send_document. Error: {copy_e}")
                 
-                # We try sending it again. Sometimes Telegram needs a slight change 
-                # in how the file is presented, or the file is a video.
-                
-                # In most cases of 'wrong file identifier', the file is recoverable, 
-                # so we inform the user of a delay and try to send it again (maybe as a video)
-                await bot.send_video(
-                    chat_id=callback.from_user.id,
-                    video=movie["file_id"], 
-                    caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
-                )
-                
+                # Attempt 2: send_document using file_id (fallback to document/video type)
+                try:
+                    await bot.send_document(
+                        chat_id=callback.from_user.id,
+                        document=movie["file_id"],
+                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
+                    )
+                except TelegramAPIError as doc_e:
+                     # Final Fallback: Try sending as video if it was a video file
+                    logger.warning(f"send_document failed for {imdb_id}. Final attempt: send_video. Error: {doc_e}")
+                    await bot.send_video(
+                        chat_id=callback.from_user.id,
+                        video=movie["file_id"],
+                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
+                    )
+
+
         else:
             # If message_id is original, use forward_message (fastest method)
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
