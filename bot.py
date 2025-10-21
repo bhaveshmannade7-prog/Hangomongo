@@ -19,7 +19,8 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 
-from database import Database, clean_text_for_search
+# FIX: AUTO_MESSAGE_ID_PLACEHOLDER import kiya gaya
+from database import Database, clean_text_for_search, AUTO_MESSAGE_ID_PLACEHOLDER
 
 # --- Configuration ---
 load_dotenv()
@@ -369,17 +370,31 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     try:
-        await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
-        
-        await bot.forward_message(
-            chat_id=callback.from_user.id,
-            from_chat_id=int(movie["channel_id"]),
-            message_id=movie["message_id"],
-        )
+        # FIX: message_id placeholder (9999999999999) check
+        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER:
+            # Agar message_id placeholder hai (JSON import se), toh file_id use karke send_document se file bhejo.
+            await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
+            
+            # send_document is used as a fallback for JSON imported files
+            await bot.send_document(
+                chat_id=callback.from_user.id,
+                document=movie["file_id"], # file_id is correct for JSON imported movies
+                caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
+            )
+            
+        else:
+            # Agar message_id asli hai, toh forward_message use karo (yeh zyaada fast aur efficient hai)
+            await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
+            await bot.forward_message(
+                chat_id=callback.from_user.id,
+                from_chat_id=int(movie["channel_id"]),
+                message_id=movie["message_id"],
+            )
         
     except TelegramAPIError as e:
         logger.error(f"Forward/edit error for {imdb_id}: {e}", exc_info=True)
-        await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward karne me dikat aayi, kripya phir से try karein.")
+        # Detailed error message for user
+        await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward karne me dikat aayi. Shayad file channel se delete ho gayi ho ya bot ko channel se access na mil raha ho. Kripya phir se try karein.")
         
     except Exception as e:
         logger.error(f"Movie callback critical error: {e}", exc_info=True)
@@ -513,6 +528,7 @@ async def import_json_movies_command(message: types.Message):
             
         await message.answer(f"⏳ <b>{len(movie_list)}</b> entries process ho rahi hain. Kripya intezaar karein.")
         
+        # db.bulk_add_new_movies mein message_id automatically 9999999999999 set ho jaayega.
         added_count, skipped_count = await db.bulk_add_new_movies(movie_list, target_channel_id)
 
         await message.answer(f"""✅ <b>Import Complete!</b>
