@@ -13,7 +13,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.enums import ParseMode
-# FIX: TelegramBadRequest import kiya gaya
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest 
 from aiogram.client.default import DefaultBotProperties
 
@@ -375,37 +374,21 @@ async def get_movie_callback(callback: types.CallbackQuery):
             
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
             
-            # CRITICAL FIX: send_copy is the most robust method for file_id references 
-            # (which are not original message IDs)
+            # FINAL FIX: Direct send_document (no complex fallbacks to avoid Bad Request)
             try:
-                # Attempt 1: Use send_copy with the file_id (preferred fallback)
-                await bot.send_copy(
+                # Attempt to send as document using the saved file_id
+                await bot.send_document(
                     chat_id=callback.from_user.id,
-                    from_chat_id=int(movie["channel_id"]),
-                    message_id=movie["message_id"], # Although placeholder, some Telegram clients might resolve it internally
+                    document=movie["file_id"], 
                     caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
                 )
-            except TelegramAPIError as copy_e:
-                # Fallback to direct media send if send_copy fails (wrong message_id)
-                logger.warning(f"send_copy failed for {imdb_id}. Attempting direct send_document. Error: {copy_e}")
-                
-                # Attempt 2: send_document using file_id (fallback to document/video type)
-                try:
-                    await bot.send_document(
-                        chat_id=callback.from_user.id,
-                        document=movie["file_id"],
-                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
-                    )
-                except TelegramAPIError as doc_e:
-                     # Final Fallback: Try sending as video if it was a video file
-                    logger.warning(f"send_document failed for {imdb_id}. Final attempt: send_video. Error: {doc_e}")
-                    await bot.send_video(
-                        chat_id=callback.from_user.id,
-                        video=movie["file_id"],
-                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
-                    )
-
-
+            except TelegramAPIError as doc_e:
+                logger.error(f"JSON File send failed for {imdb_id}: {doc_e}", exc_info=True)
+                # Inform the user that the media could not be sent (file ID is broken/expired)
+                await bot.send_message(
+                    callback.from_user.id, 
+                    f"❌ Maaf kijiye, <b>{movie['title']}</b> ki media file bhejte samay error aaya. Shayad yeh file Telegram se nikal di gayi hai ya iska file ID ab kaam nahi kar raha hai. (Admin ko error: `{doc_e.message}`) "
+                )
         else:
             # If message_id is original, use forward_message (fastest method)
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
