@@ -11,8 +11,7 @@ from typing import List, Dict
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
-# FIX: InputFile import kiya gaya
-from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, InputFile 
+from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest 
 from aiogram.client.default import DefaultBotProperties
@@ -375,37 +374,36 @@ async def get_movie_callback(callback: types.CallbackQuery):
             
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
             
-            # FINAL FIX: Direct send_document. Telegram API ab file_id ko resolve nahi kar pa rahi hai,
-            # isliye hum user ko clear error denge, ki file broken hai ya deleted hai.
+            # CRITICAL FIX (Final Attempt): Try to send as Document and Video.
+            # Agar file_id Invalid hai, to yeh fail hoga aur user ko inform karega.
+            success = False
             try:
-                # Jab file_id broken ya expired hota hai, to get_file() call karne se koi fayda nahi hota.
-                # Hum sirf ek baar send_document/send_video try karenge.
-                
-                # Agar file_id video ka hai to send_video, nahi to send_document
-                # Hum yeh मानेंगे ki file_id document/video/photo ka hai
+                # Attempt 1: Send as Document
                 await bot.send_document(
                     chat_id=callback.from_user.id,
                     document=movie["file_id"], 
                     caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
                 )
-                
-            except TelegramBadRequest as doc_e:
-                # Agar Bad Request aata hai, to iska matlab file ID Telegram par Invalid hai.
-                logger.error(f"JSON File send failed for {imdb_id}: {doc_e.message}", exc_info=True)
-                # Hum ek baar send_video try kar sakte hain as a last resort
+                success = True
+            except TelegramBadRequest:
+                # Attempt 2: Send as Video (if it's a video file)
                 try:
                     await bot.send_video(
                         chat_id=callback.from_user.id,
                         video=movie["file_id"],
                         caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
                     )
-                except TelegramAPIError:
-                     # Final failure message
-                    await bot.send_message(
-                        callback.from_user.id, 
-                        f"❌ Maaf kijiye, <b>{movie['title']}</b> ki media file bhejte samay error aaya. Shayad yeh file Telegram se nikal di gayi hai ya iska file ID ab kaam nahi kar raha hai. (Error: Media not found)"
-                    )
+                    success = True
+                except TelegramAPIError as final_e:
+                    logger.error(f"JSON File send failed for {imdb_id}: {final_e.message}", exc_info=True)
             
+            if not success:
+                # Final failure message
+                await bot.send_message(
+                    callback.from_user.id, 
+                    f"❌ Maaf kijiye, <b>{movie['title']}</b> ki media file bhejte samay error aaya. Shayad yeh file Telegram se nikal di gayi hai ya iska file ID ab kaam nahi kar raha hai. \n\n**Note:** Jis JSON data se yeh movie import hui thi, usmein save kiya gaya File ID invalid ho chuka hai. Kripya is movie ko channel par **forward** karke **`/add_movie`** se phir se index karein."
+                )
+
         else:
             # If message_id is original, use forward_message (fastest method)
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
