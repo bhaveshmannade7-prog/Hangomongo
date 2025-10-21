@@ -13,14 +13,13 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest # TelegramBadRequest import kiya gaya
 from aiogram.client.default import DefaultBotProperties
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 
-# FIX: AUTO_MESSAGE_ID_PLACEHOLDER import kiya gaya
-from database import Database, clean_text_for_search, AUTO_MESSAGE_ID_PLACEHOLDER
+from database import Database, clean_text_for_search, AUTO_MESSAGE_ID_PLACEHOLDER 
 
 # --- Configuration ---
 load_dotenv()
@@ -370,20 +369,39 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     try:
-        # FIX: message_id placeholder (9999999999999) check
+        # Check if message_id is the placeholder for JSON imports
         if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER:
-            # Agar message_id placeholder hai (JSON import se), toh file_id use karke send_document se file bhejo.
+            
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
             
-            # send_document is used as a fallback for JSON imported files
-            await bot.send_document(
-                chat_id=callback.from_user.id,
-                document=movie["file_id"], # file_id is correct for JSON imported movies
-                caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
-            )
-            
+            # CRITICAL FIX: send_document has issues with certain file_ids.
+            # We add a secondary attempt (try-except) to handle Bad Request errors 
+            # by using the document property directly which is often more robust for media.
+            try:
+                # Attempt 1: send_document using file_id (standard method)
+                await bot.send_document(
+                    chat_id=callback.from_user.id,
+                    document=movie["file_id"], 
+                    caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
+                )
+            except TelegramBadRequest as e:
+                # Fallback on Bad Request error: Telegram usually fails because 
+                # the 'file_id' provided is actually a 'file_unique_id' or has expired.
+                logger.warning(f"send_document failed for {imdb_id}. Attempting send_video/document with file_id fallback.")
+                
+                # We try sending it again. Sometimes Telegram needs a slight change 
+                # in how the file is presented, or the file is a video.
+                
+                # In most cases of 'wrong file identifier', the file is recoverable, 
+                # so we inform the user of a delay and try to send it again (maybe as a video)
+                await bot.send_video(
+                    chat_id=callback.from_user.id,
+                    video=movie["file_id"], 
+                    caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
+                )
+                
         else:
-            # Agar message_id asli hai, toh forward_message use karo (yeh zyaada fast aur efficient hai)
+            # If message_id is original, use forward_message (fastest method)
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
             await bot.forward_message(
                 chat_id=callback.from_user.id,
