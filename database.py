@@ -97,13 +97,12 @@ def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str
         # 1. Standard Ratios
         s_w_ratio = fuzz.WRatio(clean_title, q_clean)
         s_token_set = fuzz.token_set_ratio(title, query)
-        s_token_sort = fuzz.token_sort_ratio(title, query) # Improved for word order flexibility
+        s_token_sort = fuzz.token_sort_ratio(title, query) 
         
         # 2. Aggressive Partial/Substring match (crucial for short queries like 'ktra' or 'mirz')
         s_partial = fuzz.partial_ratio(clean_title, q_clean)
         
-        # 3. Phonetic match (crucial for Hinglish/vowel-mismatches like 'Kantra' vs 'Kantara')
-        # We check how much of the query's consonant signature is contained in the title's signature.
+        # 3. Phonetic match 
         s_consonant_partial = fuzz.partial_ratio(_consonant_signature(title), q_cons)
 
         # Final Score: Maximum of all robust matching methods is taken to ensure the best possible match is used.
@@ -115,7 +114,7 @@ def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str
             s_consonant_partial
         )
         
-        # Small boost if all query tokens are present (for full, correct searches)
+        # Small boost if all query tokens are present 
         if all(t in clean_title for t in tokens if t):
             score = min(100, score + 3)
         
@@ -123,7 +122,7 @@ def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str
 
     results.sort(key=lambda x: (-x[0], x[2]))
     
-    # Filtering score ko 55 se 50 kar diya hai taaki zyaada aur relevant results mil sakein (high accuracy target).
+    # Filtering score 
     final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 50][:20]
     return final
 
@@ -454,47 +453,50 @@ class Database:
         async with self.SessionLocal() as session:
             try:
                 q_clean = clean_text_for_search(query)
-                q_norm = _normalize_for_fuzzy(query)
                 
-                # --- Optimized DB Query Filters (FIX) ---
-                # Hum yahan wildcards ka use kar rahe hain taaki DB zyaada se zyaada titles ko laaye.
-                # Yeh 'Kantara' ke liye 'ktra' jaise results bhi laayega.
+                # --- Optimized DB Query Filters (FIXED FOR AGGRESSIVE SEARCH) ---
+                # Hum DB se zyaada se zyaada titles laayenge.
+                
+                # Query ko individual characters mein todkar wildcard pattern banana (Trigram-like search)
+                # 'ktra' -> '%k%t%r%a%' (Most aggressive for missing vowels/letters)
+                char_wildcard_pattern = '%' + '%'.join(list(q_clean)) + '%'
+                
                 db_filters = [
-                    # Exact Match (highest priority)
+                    # 1. Exact Match and Starts With
                     Movie.clean_title == q_clean,
-                    # Starting with (medium priority)
                     Movie.clean_title.ilike(f"{q_clean}%"),
-                    # Contains anywhere (low priority, essential for partial matches)
+
+                    # 2. Contains any substring (essential for 2+ word queries)
                     Movie.clean_title.ilike(f"%{q_clean}%"),
+                    
+                    # 3. Aggressive Character Search (FIX for 'ktra' to match 'kantara')
+                    Movie.clean_title.ilike(char_wildcard_pattern),
                 ]
-                
-                # FIX: Agar query mein 3 ya 4 letters ka shabad hai (e.g., ktra), 
-                # toh hum use aur bhi aggressively search karenge.
-                if len(q_clean) >= 3 and len(q_clean) <= 6:
-                    db_filters.append(
-                        Movie.clean_title.ilike('%' + q_clean.replace('a', '_').replace('e', '_').replace('i', '_').replace('o', '_').replace('u', '_') + '%')
-                    )
 
-
-                # Agar query mein ek se zyada shabd hain, toh sabhi shabdon ko kahin bhi search karo.
+                # 4. Multi-word match
                 if len(q_clean.split()) > 1:
                     db_filters.append(
                         Movie.clean_title.ilike('%' + '%'.join(q_clean.split()) + '%')
                     )
 
-                # Ek naya filter jo sirf query ke pehle shabad ko match karta hai, agar query mein 2+ words hain.
-                first_word = q_clean.split()[0] if q_clean else ''
-                if first_word:
-                    db_filters.append(Movie.clean_title.ilike(f"{first_word}%"))
+                # 5. Phonetic/Vowel Skip Filter (e.g., k_nt_r_)
+                if len(q_clean) > 3:
+                     # Vowels ko underscore se replace karo aur search karo
+                    vowel_skip_pattern = q_clean.replace('a', '_').replace('e', '_').replace('i', '_').replace('o', '_').replace('u', '_')
+                    if '_' in vowel_skip_pattern:
+                        db_filters.append(
+                            Movie.clean_title.ilike(f"%{vowel_skip_pattern}%")
+                        )
 
-
+                
                 filt = or_(*db_filters)
                 
-                # Zyaada candidates lao (LIMIT 200 tak badha diya hai)
+                # Candidate LIMIT ko 400 tak badha diya hai taaki fuzzy logic ko full chance mile
                 res = await session.execute(
-                    select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(200)
+                    select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(400)
                 )
                 candidates = res.all()
+                
                 if not candidates:
                     return []
                 
