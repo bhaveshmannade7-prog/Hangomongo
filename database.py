@@ -14,48 +14,50 @@ from thefuzz import fuzz
 logger = logging.getLogger(__name__)
 Base = declarative_base()
 
+# FIX 1: JSON Import kiye gaye movies ke liye placeholder message ID constant.
+# Bot.py isse check karega ki file forward karni hai ya send_document se bhejni hai.
+AUTO_MESSAGE_ID_PLACEHOLDER = 9999999999999 
+
 def clean_text_for_search(text: str) -> str:
+    """Removes special characters and common words for cleaner database search."""
     text = text.lower()
     text = re.sub(r'[^a-z0-9s]+', ' ', text)
     text = re.sub(r's+', ' ', text)
+    # Season/Sxx jaise shabdon ko hatao taaki movie titles saaf rahein
     text = re.sub(r'\b(s|season)s*d{1,2}\b', '', text) 
     return text.strip()
 
 def _normalize_for_fuzzy(text: str) -> str:
+    """Normalizes text for better fuzzy matching (e.g., phonetic similarities)."""
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
+    # Hinglish phonetic normalization
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
     return t
 
 def _consonant_signature(text: str) -> str:
+    """Extracts only consonants to detect missing vowels (ktra -> kntr)."""
     t = _normalize_for_fuzzy(text)
+    # Sirf consonants rakho
     t = re.sub(r'[aeiou]', '', t)
     t = re.sub(r's+', '', t)
     return t
 
 # --- HELPER FUNCTION TO TRANSFORM DATA (FOR JSON IMPORT) ---
-def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict:
+def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict | None:
     """
     Generates required missing fields and maps input data to the Movie model structure.
-    Checks for common variations of 'title' and 'file_id'.
+    Uses placeholder message_id for JSON imports.
     """
     
-    # 1. Map Title (Prioritize 'title', then try common alternatives)
-    title = movie_data.get("title")
-    if not title:
-        title = movie_data.get("name")
-    if not title:
-        title = movie_data.get("movie_name")
+    # 1. Map Title 
+    title = movie_data.get("title") or movie_data.get("name") or movie_data.get("movie_name")
 
-    # 2. Map File ID (Prioritize 'file_id', then try common alternatives)
-    file_id = movie_data.get("file_id")
-    if not file_id:
-        file_id = movie_data.get("file_ref")
-    if not file_id:
-        file_id = movie_data.get("media_id")
+    # 2. Map File ID
+    file_id = movie_data.get("file_id") or movie_data.get("file_ref") or movie_data.get("media_id")
 
     if not title or not file_id:
         logger.warning(f"Skipping import: Title or File ID missing after mapping attempts: {movie_data}")
@@ -69,8 +71,8 @@ def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict:
     year_match = re.search(r'\b(19|20)\d{2}\b', title)
     year = year_match.group(0) if year_match else None
 
-    # 5. Message ID (Using a large placeholder, assuming import is from unindexed files)
-    auto_message_id = 9999999999999  
+    # 5. Message ID (Using the defined placeholder for JSON imports)
+    auto_message_id = AUTO_MESSAGE_ID_PLACEHOLDER  
 
     return {
         "imdb_id": auto_imdb_id,
@@ -83,28 +85,47 @@ def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict:
 
 # --- Synchronous Helper Function for CPU-Bound Logic ---
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
-    """Runs the CPU-intensive fuzzy matching in a separate thread."""
+    """
+    Advanced fuzzy matching logic to handle spelling mistakes, typos, and word order issues aggressively.
+    Runs in a separate thread for performance.
+    """
     q_clean = clean_text_for_search(query)
     q_cons = _consonant_signature(query)
     tokens = q_clean.split()
     
     results = []
     for imdb_id, title, clean_title in candidates:
-        s1 = fuzz.WRatio(clean_title, q_clean)
-        s2 = fuzz.token_set_ratio(title, query)
-        s3 = fuzz.partial_ratio(clean_title, q_clean)
-        s4 = fuzz.ratio(_consonant_signature(title), q_cons)
-        score = max(s1, s2, s3, s4)
+        # 1. Standard Ratios
+        s_w_ratio = fuzz.WRatio(clean_title, q_clean)
+        s_token_set = fuzz.token_set_ratio(title, query)
+        s_token_sort = fuzz.token_sort_ratio(title, query) # Improved for word order flexibility
         
-        # Boost score if all query tokens are present in the clean title
+        # 2. Aggressive Partial/Substring match (crucial for short queries like 'ktra' or 'mirz')
+        s_partial = fuzz.partial_ratio(clean_title, q_clean)
+        
+        # 3. Phonetic match (crucial for Hinglish/vowel-mismatches like 'Kantra' vs 'Kantara')
+        # We check how much of the query's consonant signature is contained in the title's signature.
+        s_consonant_partial = fuzz.partial_ratio(_consonant_signature(title), q_cons)
+
+        # Final Score: Maximum of all robust matching methods is taken to ensure the best possible match is used.
+        score = max(
+            s_w_ratio, 
+            s_token_set, 
+            s_token_sort,
+            s_partial,
+            s_consonant_partial
+        )
+        
+        # Small boost if all query tokens are present (for full, correct searches)
         if all(t in clean_title for t in tokens if t):
-            score = min(100, score + 5)
+            score = min(100, score + 3)
         
         results.append((score, imdb_id, title))
 
     results.sort(key=lambda x: (-x[0], x[2]))
-    # Filter by score and limit
-    final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 55][:20]
+    
+    # Filtering score ko 55 se 50 kar diya hai taaki zyaada aur relevant results mil sakein (high accuracy target).
+    final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 50][:20]
     return final
 
 class User(Base):
@@ -140,6 +161,7 @@ class Database:
             elif database_url.startswith('postgresql://'):
                 database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
                 
+            # Neon requires SSL set as 'require'
             if 'sslmode=require' in database_url or 'sslmode=required' in database_url:
                 connect_args['ssl'] = 'require'
                 database_url = database_url.split('?')[0] # Remove query params
@@ -167,6 +189,7 @@ class Database:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             
+            # Manual migration check for clean_title column (if running on existing DB)
             if self.engine.dialect.name == 'postgresql':
                 try:
                     check_query = text(
@@ -281,6 +304,7 @@ class Database:
         skipped_count = 0
         
         async with self.SessionLocal() as session:
+            # FIX: Loop ko efficiency aur robustness ke liye update kiya gaya hai
             for new_movie in movies_data:
                 try:
                     transformed_data = generate_auto_info(new_movie, channel_id)
@@ -289,6 +313,7 @@ class Database:
                         skipped_count += 1
                         continue 
                         
+                    # Existing check (imdb_id already present)
                     result = await session.execute(
                         select(Movie.id).filter(Movie.imdb_id == transformed_data['imdb_id'])
                     )
@@ -434,11 +459,15 @@ class Database:
                 
                 # --- Optimized DB Query Filters ---
                 db_filters = [
+                    # Exact Match
                     Movie.clean_title == q_clean,
+                    # Starting with
                     Movie.clean_title.ilike(f"{q_clean}%"),
+                    # Anywhere in string (for short/partial matches)
                     Movie.clean_title.ilike(f"%{q_clean}%"),
                 ]
 
+                # Agar query mein ek se zyada shabd hain, toh sabhi shabdon ko kahin bhi search karo.
                 if len(q_clean.split()) > 1:
                     db_filters.append(
                         Movie.clean_title.ilike('%' + '%'.join(q_clean.split()) + '%')
@@ -446,6 +475,7 @@ class Database:
 
                 filt = or_(*db_filters)
                 
+                # Zyaada candidates lao taaki fuzzy search ko accuracy ke liye zyaada options milen
                 res = await session.execute(
                     select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(100)
                 )
@@ -453,6 +483,7 @@ class Database:
                 if not candidates:
                     return []
                 
+                # Heavy fuzzy logic ko separate thread mein chalao taaki bot fast rahe
                 final_results = await asyncio.to_thread(
                     _process_fuzzy_candidates, 
                     candidates, 
