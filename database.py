@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 # FIX 1: JSON Import kiye gaye movies ke liye placeholder message ID constant.
-# Bot.py isse check karega ki file forward karni hai ya send_document se bhejni hai.
 AUTO_MESSAGE_ID_PLACEHOLDER = 9999999999999 
 
 def clean_text_for_search(text: str) -> str:
@@ -457,15 +456,25 @@ class Database:
                 q_clean = clean_text_for_search(query)
                 q_norm = _normalize_for_fuzzy(query)
                 
-                # --- Optimized DB Query Filters ---
+                # --- Optimized DB Query Filters (FIX) ---
+                # Hum yahan wildcards ka use kar rahe hain taaki DB zyaada se zyaada titles ko laaye.
+                # Yeh 'Kantara' ke liye 'ktra' jaise results bhi laayega.
                 db_filters = [
-                    # Exact Match
+                    # Exact Match (highest priority)
                     Movie.clean_title == q_clean,
-                    # Starting with
+                    # Starting with (medium priority)
                     Movie.clean_title.ilike(f"{q_clean}%"),
-                    # Anywhere in string (for short/partial matches)
+                    # Contains anywhere (low priority, essential for partial matches)
                     Movie.clean_title.ilike(f"%{q_clean}%"),
                 ]
+                
+                # FIX: Agar query mein 3 ya 4 letters ka shabad hai (e.g., ktra), 
+                # toh hum use aur bhi aggressively search karenge.
+                if len(q_clean) >= 3 and len(q_clean) <= 6:
+                    db_filters.append(
+                        Movie.clean_title.ilike('%' + q_clean.replace('a', '_').replace('e', '_').replace('i', '_').replace('o', '_').replace('u', '_') + '%')
+                    )
+
 
                 # Agar query mein ek se zyada shabd hain, toh sabhi shabdon ko kahin bhi search karo.
                 if len(q_clean.split()) > 1:
@@ -473,11 +482,17 @@ class Database:
                         Movie.clean_title.ilike('%' + '%'.join(q_clean.split()) + '%')
                     )
 
+                # Ek naya filter jo sirf query ke pehle shabad ko match karta hai, agar query mein 2+ words hain.
+                first_word = q_clean.split()[0] if q_clean else ''
+                if first_word:
+                    db_filters.append(Movie.clean_title.ilike(f"{first_word}%"))
+
+
                 filt = or_(*db_filters)
                 
-                # Zyaada candidates lao taaki fuzzy search ko accuracy ke liye zyaada options milen
+                # Zyaada candidates lao (LIMIT 200 tak badha diya hai)
                 res = await session.execute(
-                    select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(100)
+                    select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(200)
                 )
                 candidates = res.all()
                 if not candidates:
