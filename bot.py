@@ -126,21 +126,18 @@ Be-rukavat access ke liye alternate bots use karein; neeche se choose karke tura
 async def keep_db_alive():
     """Keeps the database connection pool active by running a lightweight query."""
     while True:
-        # CRITICAL FIX: Keepalive time reduced to 60s (1 minute) for better free tier stability
+        # CRITICAL FIX: 60s is very aggressive to prevent connection drops.
         await asyncio.sleep(60) 
         try:
-            # We don't care about the result, just that the connection works
             await db.get_user_count() 
             logger.info("DB keepalive successful.")
         except Exception as e:
-            # If keepalive fails, the retry logic in database.py methods should handle it
             logger.error(f"DB keepalive failed: {e}") 
 
 
 # --- Lifespan management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # init_db now has its own retry logic
     await db.init_db() 
     db_task = asyncio.create_task(keep_db_alive()) 
 
@@ -196,12 +193,12 @@ async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: 
 async def ping():
     return {"status": "ok", "service": "Movie Bot is Live", "uptime": get_uptime()}
 
-# --- Concurrency gate (Most important for Free Tier stability) ---
+# --- Concurrency gate ---
 async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
     
-    # We must ensure DB can handle the user update before proceeding
+    # DB add_user now has retry logic
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
     if user_id == ADMIN_USER_ID:
@@ -215,7 +212,6 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     return True
 
 # --- Handlers ---
-# (start_command, help_command, check_join_callback handlers are the same)
 
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
@@ -242,7 +238,6 @@ Access Level: Full Management
 • /broadcast — Reply to message to send
 • /cleanup_users — Deactivate inactive users
 • /add_movie — Reply: /add_movie imdb_id | title | year
-• /import_json_movies channel_id — Reply to a JSON file
 • /rebuild_index — Recompute clean titles
 • /export_csv users|movies [limit]
 • /set_limit N — Change concurrency cap"""
@@ -281,7 +276,6 @@ Agar Bot slow ho ya ruk jaaye, toh <b>Alternate Bots</b> use karein jo /start ka
 async def check_join_callback(callback: types.CallbackQuery):
     await callback.answer("Verifying…")
     
-    # Update user activity and check capacity
     # ensure_capacity_or_inform will handle user update and capacity check
     active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     if active_users > CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
@@ -357,69 +351,44 @@ async def get_movie_callback(callback: types.CallbackQuery):
     if not await ensure_capacity_or_inform(callback.message):
         return
         
-    # DB call now has retry logic
     movie = await db.get_movie_by_imdb(imdb_id)
     if not movie:
         await callback.message.edit_text("❌ Yeh movie ab database me uplabdh nahi hai.")
         return
         
     try:
-        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER:
-            
-            await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
-            
-            success = False
-            final_error_message = ""
-            
-            # 1. Attempt as Document
+        # NOTE: JSON imported files are now treated like normal files since bulk_add is gone.
+        # This simplifies the logic significantly.
+        
+        # Original indexed file: use forward_message (fastest method)
+        await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
+        await bot.forward_message(
+            chat_id=callback.from_user.id,
+            from_chat_id=int(movie["channel_id"]),
+            message_id=movie["message_id"],
+        )
+        
+    except TelegramAPIError as e:
+        logger.error(f"Forward/edit error for {imdb_id}: {e}", exc_info=True)
+        # Fallback to file_id if message_id fails (This handles old JSON imports where message_id was 9090909090)
+        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message not found' in str(e).lower() or 'bad request: message to forward not found' in str(e).lower():
             try:
                 await bot.send_document(
                     chat_id=callback.from_user.id,
                     document=movie["file_id"], 
                     caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
                 )
-                success = True
-            except TelegramBadRequest as doc_e:
-                final_error_message = doc_e.message
-                logger.warning(f"JSON Send (Doc) failed for {imdb_id}: {doc_e.message}")
-                
-                # 2. Attempt as Video
-                if not success:
-                    try:
-                        await bot.send_video(
-                            chat_id=callback.from_user.id,
-                            video=movie["file_id"],
-                            caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
-                        )
-                        success = True
-                    except TelegramBadRequest as vid_e:
-                        final_error_message = vid_e.message
-                        logger.warning(f"JSON Send (Vid) failed for {imdb_id}: {vid_e.message}")
-                        
-            if not success:
-                await bot.send_message(
-                    callback.from_user.id, 
-                    f"❌ Maaf kijiye, <b>{movie['title']}</b> ki media file bhejte samay **final error** aaya. Aapka JSON file ID invalid ho chuka hai. \n\n**Note:** Kripya is movie ko channel par **forward** karke **`/add_movie`** se phir se index karein. ({final_error_message[:40]}...)"
-                )
-
+            except Exception as e2:
+                logger.error(f"Fallback send_document failed: {e2}", exc_info=True)
+                await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward/send karne me dikat aayi. Shayad file channel से delete हो गई हो या bot को channel से access ना मिल रहा हो। कॄपया `/add_movie` से re-index करे।")
         else:
-            # Original indexed file: use forward_message
-            await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
-            await bot.forward_message(
-                chat_id=callback.from_user.id,
-                from_chat_id=int(movie["channel_id"]),
-                message_id=movie["message_id"],
-            )
-        
-    except TelegramAPIError as e:
-        logger.error(f"Forward/edit error for {imdb_id}: {e}", exc_info=True)
-        await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward karne me dikat aayi. Shayad file channel se delete ho gayi ho ya bot ko channel se access na mil raha ho. Kripya phir se try karein.")
+             await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward/send karne me dikat aayi. Shayad file channel से delete हो गई हो या bot को channel से access ना मिल रहा हो।")
         
     except Exception as e:
         logger.error(f"Movie callback critical error: {e}", exc_info=True)
         await bot.send_message(callback.from_user.id, "❌ Critical system error: kripya /start karein.")
 
-# (Admin commands are the same, they rely on the improved DB methods)
+# (Admin commands)
 
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
@@ -511,59 +480,7 @@ async def add_movie_command(message: types.Message):
     else:
         await message.answer("❌ Movie add karne me error aaya (DB connection issue).")
 
-@dp.message(Command("import_json_movies"), AdminFilter())
-async def import_json_movies_command(message: types.Message):
-    """Admin command to import movie data from a JSON file reply."""
-    if not message.reply_to_message or not message.reply_to_message.document:
-        await message.answer("❌ JSON फ़ाइल को reply करें।\nUsage: /import_json_movies channel_id")
-        return
-
-    args = message.text.split()
-    if len(args) < 2 or not args[1].lstrip('-').isdigit():
-        await message.answer("❌ Channel ID missing ya invalid hai.\nUsage: /import_json_movies -100xxxxxxxxxx")
-        return
-        
-    try:
-        target_channel_id = int(args[1])
-        if target_channel_id > 0: 
-             await message.answer("❌ Channel ID galat hai, yeh hamesha negative (-100...) hota hai.")
-             return
-    except ValueError:
-        await message.answer("❌ Channel ID number hona chahiye.")
-        return
-
-    file_id = message.reply_to_message.document.file_id
-    file_info = await bot.get_file(file_id)
-    file_path = file_info.file_path
-    
-    file_content = io.BytesIO()
-    await bot.download_file(file_path, file_content)
-    file_content.seek(0)
-
-    try:
-        movie_list = json.load(file_content)
-        if not isinstance(movie_list, list) or not (len(movie_list) > 0 and isinstance(movie_list[0], dict)):
-            await message.answer("❌ JSON format galat hai. Expected: List of JSON Objects ([{}, {}, ...]).")
-            return
-            
-        await message.answer(f"⏳ <b>{len(movie_list)}</b> entries process ho rahi hain. Kripya intezaar karein.")
-        
-        added_count, skipped_count = await db.bulk_add_new_movies(movie_list, target_channel_id)
-
-        if added_count == 0 and skipped_count == 0:
-            await message.answer("❌ Internal error while importing (DB connection issue). Check logs.")
-        else:
-            await message.answer(f"""✅ <b>Import Complete!</b>
-• Successfully Added: {added_count}
-• Already Exists (Skipped): {skipped_count}
-• Total Processed: {len(movie_list)}""")
-
-    except json.JSONDecodeError:
-        await message.answer("❌ Uploaded file valid JSON format mein nahi hai.")
-    except Exception as e:
-        logger.error(f"Import JSON failed: {e}", exc_info=True)
-        await message.answer(f"❌ Internal error while processing: {type(e).__name__}. Check logs for details.")
-
+# NOTE: @dp.message(Command("import_json_movies"), AdminFilter()) handler has been removed.
 
 @dp.message(Command("rebuild_index"), AdminFilter())
 async def rebuild_index_command(message: types.Message):
