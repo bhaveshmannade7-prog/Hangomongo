@@ -18,26 +18,69 @@ Base = declarative_base()
 # JSON Import ke liye safe placeholder
 AUTO_MESSAGE_ID_PLACEHOLDER = 9090909090 
 
-# (clean_text_for_search, _normalize_for_fuzzy, _consonant_signature, generate_auto_info, _process_fuzzy_candidates, User, Movie classes are the same)
-# ... (classes definitions omitted for brevity, they remain unchanged)
+# --- CRITICAL FIX: Functions must be defined at the top level for 'bot.py' to import them ---
+
+def clean_text_for_search(text: str) -> str:
+    """Removes special characters and common words for cleaner database search."""
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9s]+', ' ', text)
+    text = re.sub(r's+', ' ', text)
+    # Season/Sxx jaise shabdon ko hatao taaki movie titles saaf rahein
+    text = re.sub(r'\b(s|season)s*d{1,2}\b', '', text) 
+    return text.strip()
+
+def _normalize_for_fuzzy(text: str) -> str:
+    """Normalizes text for better fuzzy matching (e.g., phonetic similarities)."""
+    t = text.lower()
+    t = re.sub(r'[^a-z0-9s]', ' ', t)
+    t = re.sub(r's+', ' ', t).strip()
+    # Hinglish phonetic normalization
+    t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
+    t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
+    t = t.replace('x', 'ks').replace('c', 'k')
+    return t
+
+def _consonant_signature(text: str) -> str:
+    """Extracts only consonants to detect missing vowels (ktra -> kntr)."""
+    t = _normalize_for_fuzzy(text)
+    # Sirf consonants rakho
+    t = re.sub(r'[aeiou]', '', t)
+    t = re.sub(r's+', '', t)
+    return t
 
 # --- HELPER FUNCTION TO TRANSFORM DATA (FOR JSON IMPORT) ---
 def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict | None:
-    # ... (function body is same)
+    """
+    Generates required missing fields and maps input data to the Movie model structure.
+    Uses placeholder message_id for JSON imports.
+    """
+    
+    # 1. Map Title (title ya name/movie_name me se koi ek hona chahiye)
     title = movie_data.get("title") or movie_data.get("name") or movie_data.get("movie_name")
+
+    # 2. Map File ID (file_id ya file_ref/media_id me se koi ek hona chahiye)
     file_id = movie_data.get("file_id") or movie_data.get("file_ref") or movie_data.get("media_id")
+
+    # CRITICAL CHECK: Sirf title aur file_id chahiye
     if not title or not file_id:
         logger.warning(f"Skipping import: Title or File ID missing after mapping attempts: {movie_data}")
         return None
+
+    # 3. IMDB ID (Agar original IMDB ID nahi hai to hash use karo)
     imdb_id = movie_data.get("imdb_id") 
     if not imdb_id:
         hash_object = hashlib.sha1(f"{title}{file_id}".encode('utf-8'))
         imdb_id = f"auto_{hash_object.hexdigest()[:15]}" 
+
+    # 4. Year (Attempt to extract year from title, ya JSON se lo)
     year = movie_data.get("year")
     if not year:
         year_match = re.search(r'\b(19|20)\d{2}\b', title)
         year = year_match.group(0) if year_match else None
+
+    # 5. Message ID (Hamesha placeholder use karo JSON imported files ke liye)
     auto_message_id = AUTO_MESSAGE_ID_PLACEHOLDER  
+
     return {
         "imdb_id": imdb_id,
         "title": title,
@@ -46,24 +89,48 @@ def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict | None:
         "message_id": auto_message_id,
         "channel_id": channel_id,
     }
-    
+
+# --- Synchronous Helper Function for CPU-Bound Logic ---
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
-    # ... (function body is same)
+    """
+    Advanced fuzzy matching logic to handle spelling mistakes, typos, and word order issues aggressively.
+    Runs in a separate thread for performance.
+    """
     q_clean = clean_text_for_search(query)
     q_cons = _consonant_signature(query)
     tokens = q_clean.split()
+    
     results = []
     for imdb_id, title, clean_title in candidates:
+        # 1. Standard Ratios
         s_w_ratio = fuzz.WRatio(clean_title, q_clean)
         s_token_set = fuzz.token_set_ratio(title, query)
         s_token_sort = fuzz.token_sort_ratio(title, query) 
+        
+        # 2. Aggressive Partial/Substring match (crucial for short queries like 'ktra' or 'mirz')
         s_partial = fuzz.partial_ratio(clean_title, q_clean)
+        
+        # 3. Phonetic match 
         s_consonant_partial = fuzz.partial_ratio(_consonant_signature(title), q_cons)
-        score = max(s_w_ratio, s_token_set, s_token_sort, s_partial, s_consonant_partial)
+
+        # Final Score: Maximum of all robust matching methods is taken to ensure the best possible match is used.
+        score = max(
+            s_w_ratio, 
+            s_token_set, 
+            s_token_sort,
+            s_partial,
+            s_consonant_partial
+        )
+        
+        # Small boost if all query tokens are present 
         if all(t in clean_title for t in tokens if t):
             score = min(100, score + 3)
+        
         results.append((score, imdb_id, title))
+
     results.sort(key=lambda x: (-x[0], x[2]))
+    
+    # Filtering score 
     final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 50][:20]
     return final
 
@@ -104,17 +171,17 @@ class Database:
                 connect_args['ssl'] = 'require'
                 database_url = database_url.split('?')[0]
 
-        self.database_url = database_url # FIX: Store URL for re-init
+        self.database_url = database_url 
         self.engine = create_async_engine(
             database_url, 
             echo=False, 
             connect_args=connect_args,
             # HIGH-RESILIENCE settings for Render/Neon Free Tier (More aggressive pooling)
-            pool_size=30, # FIX: Increased from 20
-            max_overflow=60, # FIX: Increased from 40
+            pool_size=30, 
+            max_overflow=60, 
             pool_pre_ping=True, 
             pool_recycle=60,  # CRITICAL FIX: Reduced from 180s to 60s for rapid connection cleanup
-            pool_timeout=10, # FIX: Reduced from 15s to 10s
+            pool_timeout=10, 
         )
         
         self.SessionLocal = sessionmaker(
@@ -152,7 +219,6 @@ class Database:
             try:
                 async with self.engine.begin() as conn:
                     await conn.run_sync(Base.metadata.create_all)
-                    # (Migration check logic is the same)
                     
                     if self.engine.dialect.name == 'postgresql':
                         try:
@@ -248,8 +314,6 @@ class Database:
                 return 0
         return 0
 
-    # ... (Other DB methods will also need the try/except/retry block if they use SessionLocal)
-    
     async def get_all_users(self):
         max_retries = 2
         for attempt in range(max_retries):
