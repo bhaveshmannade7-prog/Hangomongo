@@ -14,8 +14,8 @@ from thefuzz import fuzz
 logger = logging.getLogger(__name__)
 Base = declarative_base()
 
-# FIX 1: JSON Import kiye gaye movies ke liye placeholder message ID constant.
-AUTO_MESSAGE_ID_PLACEHOLDER = 9999999999999 
+# FIX: JSON Import kiye gaye movies ke liye chota aur safe placeholder message ID constant.
+AUTO_MESSAGE_ID_PLACEHOLDER = 9090909090 
 
 def clean_text_for_search(text: str) -> str:
     """Removes special characters and common words for cleaner database search."""
@@ -173,9 +173,9 @@ class Database:
             database_url, 
             echo=False, 
             connect_args=connect_args,
-            # HIGH-RESILIENCE settings for Render/Neon Free Tier
-            pool_size=10, 
-            max_overflow=20, 
+            # HIGH-RESILIENCE settings for Render/Neon Free Tier (Increased pool size)
+            pool_size=20, # FIX: Increased from 10
+            max_overflow=40, # FIX: Increased from 20
             pool_pre_ping=True, 
             pool_recycle=180,  # CRITICAL FIX: Reduced from 300s to 180s for better Free Tier resilience
             pool_timeout=15, 
@@ -460,7 +460,7 @@ class Database:
                 q_clean = clean_text_for_search(query)
                 
                 # --- Optimized DB Query Filters (FIXED FOR AGGRESSIVE SEARCH) ---
-                # Hum DB se zyaada se zyaada titles laayenge.
+                # Hum DB se zyaada se zyaada titles laayेंगे.
                 
                 # Query ko individual characters mein todkar wildcard pattern banana (Trigram-like search)
                 # 'ktra' -> '%k%t%r%a%' (Most aggressive for missing vowels/letters)
@@ -506,6 +506,7 @@ class Database:
                     return []
                 
                 # Heavy fuzzy logic ko separate thread mein chalao taaki bot fast rahe
+                # FIX: Ab yeh search logic main thread ko block nahi karega.
                 final_results = await asyncio.to_thread(
                     _process_fuzzy_candidates, 
                     candidates, 
