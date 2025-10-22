@@ -126,7 +126,6 @@ Be-rukavat access ke liye alternate bots use karein; neeche se choose karke tura
 async def keep_db_alive():
     """Keeps the database connection pool active by running a lightweight query."""
     while True:
-        # CRITICAL FIX: 60s is very aggressive to prevent connection drops.
         await asyncio.sleep(60) 
         try:
             await db.get_user_count() 
@@ -198,7 +197,6 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
     
-    # DB add_user now has retry logic
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
     if user_id == ADMIN_USER_ID:
@@ -276,7 +274,6 @@ Agar Bot slow ho ya ruk jaaye, toh <b>Alternate Bots</b> use karein jo /start ka
 async def check_join_callback(callback: types.CallbackQuery):
     await callback.answer("Verifying…")
     
-    # ensure_capacity_or_inform will handle user update and capacity check
     active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     if active_users > CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
         try:
@@ -321,7 +318,6 @@ async def search_movie_handler(message: types.Message):
     searching_msg = await message.answer(f"🔍 <b>{original_query}</b> ki khoj jaari hai…")
     
     try:
-        # DB search has built-in retry logic now
         top = await db.super_search_movies_advanced(original_query, limit=20)
         
         if not top:
@@ -356,39 +352,49 @@ async def get_movie_callback(callback: types.CallbackQuery):
         await callback.message.edit_text("❌ Yeh movie ab database me uplabdh nahi hai.")
         return
         
+    success = False
+    
+    # 1. Attempt to Forward (Primary method)
     try:
-        # NOTE: JSON imported files are now treated like normal files since bulk_add is gone.
-        # This simplifies the logic significantly.
-        
-        # Original indexed file: use forward_message (fastest method)
         await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
         await bot.forward_message(
             chat_id=callback.from_user.id,
             from_chat_id=int(movie["channel_id"]),
             message_id=movie["message_id"],
         )
+        success = True
         
     except TelegramAPIError as e:
-        logger.error(f"Forward/edit error for {imdb_id}: {e}", exc_info=True)
-        # Fallback to file_id if message_id fails (This handles old JSON imports where message_id was 9090909090)
-        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message not found' in str(e).lower() or 'bad request: message to forward not found' in str(e).lower():
+        logger.error(f"Forward failed for {imdb_id}: {e}", exc_info=True)
+        
+        # 2. Fallback to send_document using file_id (Handles deleted messages and old JSON imports)
+        # We only try this if the error is specifically about the message not being found or if it's the old placeholder ID.
+        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in str(e).lower():
             try:
+                # Attempt to send as document
                 await bot.send_document(
                     chat_id=callback.from_user.id,
                     document=movie["file_id"], 
                     caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
                 )
+                success = True
+                
             except Exception as e2:
-                logger.error(f"Fallback send_document failed: {e2}", exc_info=True)
-                await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward/send karne me dikat aayi. Shayad file channel से delete हो गई हो या bot को channel से access ना मिल रहा हो। कॄपया `/add_movie` से re-index करे।")
-        else:
-             await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward/send karne me dikat aayi. Shayad file channel से delete हो गई हो या bot को channel से access ना मिल रहा हो।")
-        
-    except Exception as e:
-        logger.error(f"Movie callback critical error: {e}", exc_info=True)
-        await bot.send_message(callback.from_user.id, "❌ Critical system error: kripya /start karein.")
+                logger.error(f"Fallback send_document failed for {imdb_id}: {e2}", exc_info=True)
+                
+    # 3. Final failure message
+    if not success:
+        await bot.send_message(
+            callback.from_user.id, 
+            f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward/send karne me dikat aayi. Shayad file channel से delete हो गई हो या **File ID** अमान्य है। कॄपया `/add_movie` से re-index करे।"
+        )
+        # Edit the callback message to reflect the failure
+        try:
+            await callback.message.edit_text(f"❌ <b>{movie['title']}</b> ko forward karne me error aaya. Upar chat check karein.")
+        except:
+             pass 
 
-# (Admin commands)
+# (Admin commands start here, they use the robust DB methods)
 
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
@@ -480,7 +486,6 @@ async def add_movie_command(message: types.Message):
     else:
         await message.answer("❌ Movie add karne me error aaya (DB connection issue).")
 
-# NOTE: @dp.message(Command("import_json_movies"), AdminFilter()) handler has been removed.
 
 @dp.message(Command("rebuild_index"), AdminFilter())
 async def rebuild_index_command(message: types.Message):
