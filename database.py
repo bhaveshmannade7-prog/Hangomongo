@@ -8,24 +8,23 @@ from typing import List, Dict, Tuple, Any
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_, text 
-from sqlalchemy.exc import OperationalError, DisconnectionError # CRITICAL IMPORT
+from sqlalchemy.exc import OperationalError, DisconnectionError
 
 from thefuzz import fuzz
 
 logger = logging.getLogger(__name__)
 Base = declarative_base()
 
-# JSON Import ke liye safe placeholder
+# JSON Import command hatane ke baad iski zaroorat nahi hai, lekin code clean-up ke liye rakha hai.
 AUTO_MESSAGE_ID_PLACEHOLDER = 9090909090 
 
-# --- CRITICAL FIX: Functions must be defined at the top level for 'bot.py' to import them ---
+# --- Helper Functions (Same as before) ---
 
 def clean_text_for_search(text: str) -> str:
     """Removes special characters and common words for cleaner database search."""
     text = text.lower()
     text = re.sub(r'[^a-z0-9s]+', ' ', text)
     text = re.sub(r's+', ' ', text)
-    # Season/Sxx jaise shabdon ko hatao taaki movie titles saaf rahein
     text = re.sub(r'\b(s|season)s*d{1,2}\b', '', text) 
     return text.strip()
 
@@ -34,7 +33,6 @@ def _normalize_for_fuzzy(text: str) -> str:
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
-    # Hinglish phonetic normalization
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
@@ -43,58 +41,16 @@ def _normalize_for_fuzzy(text: str) -> str:
 def _consonant_signature(text: str) -> str:
     """Extracts only consonants to detect missing vowels (ktra -> kntr)."""
     t = _normalize_for_fuzzy(text)
-    # Sirf consonants rakho
     t = re.sub(r'[aeiou]', '', t)
     t = re.sub(r's+', '', t)
     return t
 
-# --- HELPER FUNCTION TO TRANSFORM DATA (FOR JSON IMPORT) ---
-def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict | None:
-    """
-    Generates required missing fields and maps input data to the Movie model structure.
-    Uses placeholder message_id for JSON imports.
-    """
-    
-    # 1. Map Title (title ya name/movie_name me se koi ek hona chahiye)
-    title = movie_data.get("title") or movie_data.get("name") or movie_data.get("movie_name")
+# NOTE: generate_auto_info function has been removed.
 
-    # 2. Map File ID (file_id ya file_ref/media_id me se koi ek hona chahiye)
-    file_id = movie_data.get("file_id") or movie_data.get("file_ref") or movie_data.get("media_id")
-
-    # CRITICAL CHECK: Sirf title aur file_id chahiye
-    if not title or not file_id:
-        logger.warning(f"Skipping import: Title or File ID missing after mapping attempts: {movie_data}")
-        return None
-
-    # 3. IMDB ID (Agar original IMDB ID nahi hai to hash use karo)
-    imdb_id = movie_data.get("imdb_id") 
-    if not imdb_id:
-        hash_object = hashlib.sha1(f"{title}{file_id}".encode('utf-8'))
-        imdb_id = f"auto_{hash_object.hexdigest()[:15]}" 
-
-    # 4. Year (Attempt to extract year from title, ya JSON se lo)
-    year = movie_data.get("year")
-    if not year:
-        year_match = re.search(r'\b(19|20)\d{2}\b', title)
-        year = year_match.group(0) if year_match else None
-
-    # 5. Message ID (Hamesha placeholder use karo JSON imported files ke liye)
-    auto_message_id = AUTO_MESSAGE_ID_PLACEHOLDER  
-
-    return {
-        "imdb_id": imdb_id,
-        "title": title,
-        "year": year,
-        "file_id": file_id,
-        "message_id": auto_message_id,
-        "channel_id": channel_id,
-    }
-
-# --- Synchronous Helper Function for CPU-Bound Logic ---
+# --- Synchronous Helper Function for CPU-Bound Logic (Same) ---
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
     """
     Advanced fuzzy matching logic to handle spelling mistakes, typos, and word order issues aggressively.
-    Runs in a separate thread for performance.
     """
     q_clean = clean_text_for_search(query)
     q_cons = _consonant_signature(query)
@@ -102,37 +58,22 @@ def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str
     
     results = []
     for imdb_id, title, clean_title in candidates:
-        # 1. Standard Ratios
         s_w_ratio = fuzz.WRatio(clean_title, q_clean)
         s_token_set = fuzz.token_set_ratio(title, query)
         s_token_sort = fuzz.token_sort_ratio(title, query) 
-        
-        # 2. Aggressive Partial/Substring match (crucial for short queries like 'ktra' or 'mirz')
         s_partial = fuzz.partial_ratio(clean_title, q_clean)
-        
-        # 3. Phonetic match 
         s_consonant_partial = fuzz.partial_ratio(_consonant_signature(title), q_cons)
-
-        # Final Score: Maximum of all robust matching methods is taken to ensure the best possible match is used.
-        score = max(
-            s_w_ratio, 
-            s_token_set, 
-            s_token_sort,
-            s_partial,
-            s_consonant_partial
-        )
-        
-        # Small boost if all query tokens are present 
+        score = max(s_w_ratio, s_token_set, s_token_sort, s_partial, s_consonant_partial)
         if all(t in clean_title for t in tokens if t):
             score = min(100, score + 3)
-        
         results.append((score, imdb_id, title))
 
     results.sort(key=lambda x: (-x[0], x[2]))
     
-    # Filtering score 
     final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 50][:20]
     return final
+
+# --- DB Models (Same) ---
 
 class User(Base):
     __tablename__ = 'users'
@@ -176,11 +117,11 @@ class Database:
             database_url, 
             echo=False, 
             connect_args=connect_args,
-            # HIGH-RESILIENCE settings for Render/Neon Free Tier (More aggressive pooling)
+            # MAX-RESILIENCE settings for Render/Neon Free Tier
             pool_size=30, 
             max_overflow=60, 
             pool_pre_ping=True, 
-            pool_recycle=60,  # CRITICAL FIX: Reduced from 180s to 60s for rapid connection cleanup
+            pool_recycle=60,  # CRITICAL: 60s is very aggressive to prevent connection drops.
             pool_timeout=10, 
         )
         
@@ -209,9 +150,9 @@ class Database:
             except Exception as re_e:
                 logger.critical(f"Failed to re-initialize DB engine: {re_e}", exc_info=True)
                 return False # Cannot recover
-        return False # Not a connection error
+        return False 
         
-    # --- Wrapped DB Operations to ensure resilience ---
+    # --- Robust DB Operations with Retry Logic (Most critical for responsiveness) ---
     
     async def init_db(self):
         max_retries = 3
@@ -251,7 +192,7 @@ class Database:
                 return
             except Exception as e:
                 if await self._handle_db_error(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt) # Exponential backoff
+                    await asyncio.sleep(2 ** attempt) 
                     continue
                 logger.critical(f"Failed to initialize DB after {attempt + 1} attempts.", exc_info=True)
                 raise 
@@ -372,58 +313,7 @@ class Database:
                 return False
         return False
         
-    async def bulk_add_new_movies(self, movies_data: List[Dict], channel_id: int):
-        added_count = 0
-        skipped_count = 0
-        max_retries = 2
-        
-        for attempt in range(max_retries):
-            try:
-                async with self.SessionLocal() as session:
-                    current_added_count = 0
-                    current_skipped_count = 0
-                    
-                    for new_movie in movies_data:
-                        transformed_data = generate_auto_info(new_movie, channel_id)
-                        if not transformed_data:
-                            current_skipped_count += 1
-                            continue 
-                            
-                        result = await session.execute(
-                            select(Movie.id).filter(Movie.imdb_id == transformed_data['imdb_id'])
-                        )
-                        if result.scalar_one_or_none():
-                            current_skipped_count += 1
-                            continue 
-                            
-                        clean_title = clean_text_for_search(transformed_data['title'])
-                        new_movie_entry = Movie(
-                            imdb_id=transformed_data['imdb_id'], 
-                            title=transformed_data['title'], 
-                            clean_title=clean_title, 
-                            year=transformed_data['year'],
-                            file_id=transformed_data['file_id'], 
-                            message_id=transformed_data['message_id'], 
-                            channel_id=transformed_data['channel_id']
-                        )
-                        session.add(new_movie_entry)
-                        current_added_count += 1
-                        
-                    if current_added_count > 0:
-                        await session.commit()
-                        added_count += current_added_count
-                    skipped_count += current_skipped_count
-                    return added_count, skipped_count
-                
-            except Exception as e:
-                if await self._handle_db_error(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                await session.rollback()
-                logger.error(f"Bulk commit failed: {e}", exc_info=True)
-                # Agar fail hua to sirf first attempt mein rollback hoga, doosre mein skip hoga.
-                return 0, len(movies_data) - 1 # Pessimistic fail count
-        return 0, len(movies_data) - 1
+    # NOTE: bulk_add_new_movies has been removed.
 
     async def get_movie_count(self):
         max_retries = 2
@@ -564,8 +454,6 @@ class Database:
             try:
                 async with self.SessionLocal() as session:
                     q_clean = clean_text_for_search(query)
-                    
-                    # (DB filter logic is the same)
                     
                     char_wildcard_pattern = '%' + '%'.join(list(q_clean)) + '%'
                     
