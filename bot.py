@@ -82,6 +82,7 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
+    # NOTE: Membership check logic is often required but currently returns True in your code.
     return True 
 
 def get_join_keyboard():
@@ -130,7 +131,7 @@ async def keep_db_alive():
         await asyncio.sleep(180) 
         try:
             await db.get_user_count() 
-            logger.debug("DB keepalive successful.")
+            logger.info("DB keepalive successful.") # FIX: Log level changed to INFO
         except Exception as e:
             logger.error(f"DB keepalive failed: {e}", exc_info=True)
 
@@ -324,11 +325,8 @@ async def search_movie_handler(message: types.Message):
     searching_msg = await message.answer(f"🔍 <b>{original_query}</b> ki khoj jaari hai…")
     
     try:
-        # Reduced timeout to 10.0s for better responsiveness on Free Tier
-        top = await asyncio.wait_for(
-            db.super_search_movies_advanced(original_query, limit=20),
-            timeout=10.0 
-        )
+        # FIX: asyncio.wait_for hata diya gaya hai taaki heavy search logic ko time mil sake aur bot hang na ho.
+        top = await db.super_search_movies_advanced(original_query, limit=20)
         
         if not top:
             await searching_msg.edit_text(
@@ -341,13 +339,6 @@ async def search_movie_handler(message: types.Message):
             f"🎬 <b>{original_query}</b> ke liye {len(top)} results mile — file paane ke liye chunein:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
-        
-    except asyncio.TimeoutError:
-        logger.warning(f"Search timed out for query: {original_query}")
-        try:
-            await searching_msg.edit_text("⌛️ Search mein samay zyada lag gaya (Database slow). Kripya kuch der baad phir se koshish karein.")
-        except TelegramAPIError:
-            pass
             
     except Exception as e:
         logger.error(f"Search error for '{original_query}': {e}", exc_info=True) 
@@ -376,10 +367,11 @@ async def get_movie_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
             
             # CRITICAL FIX: Robust Triple Fallback for JSON imported files
+            # JSON imported files ko sirf file_id se hi bheja ja sakta hai.
             success = False
             final_error_message = ""
             
-            # 1. Attempt as Document
+            # 1. Attempt as Document (General fallback)
             try:
                 await bot.send_document(
                     chat_id=callback.from_user.id,
@@ -391,7 +383,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
                 final_error_message = doc_e.message
                 logger.warning(f"JSON Send (Doc) failed for {imdb_id}: {doc_e.message}")
                 
-                # 2. Attempt as Video
+                # 2. Attempt as Video (Agar Document fail ho gaya)
                 if not success:
                     try:
                         await bot.send_video(
@@ -404,19 +396,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
                         final_error_message = vid_e.message
                         logger.warning(f"JSON Send (Vid) failed for {imdb_id}: {vid_e.message}")
                         
-                        # 3. EXTREME FALLBACK: Try forwarding with placeholder message_id (Last resort)
-                        if not success:
-                            try:
-                                await bot.forward_message(
-                                    chat_id=callback.from_user.id,
-                                    from_chat_id=int(movie["channel_id"]),
-                                    # Yahan placeholder message_id use karna, agar file_id fail ho chuka ho
-                                    message_id=movie["message_id"], 
-                                )
-                                success = True
-                            except TelegramAPIError as forward_e:
-                                final_error_message = forward_e.message
-                                logger.error(f"JSON Send (Forward) failed for {imdb_id}: {forward_e.message}", exc_info=True)
+                        # Note: Invalid message_id error se bachne ke liye forward_message ka attempt hata diya gaya hai.
             
             if not success:
                 # Final failure message
@@ -571,7 +551,7 @@ async def import_json_movies_command(message: types.Message):
             
         await message.answer(f"⏳ <b>{len(movie_list)}</b> entries process ho rahi hain. Kripya intezaar karein.")
         
-        # db.bulk_add_new_movies mein message_id automatically 9999999999999 set ho jaayega.
+        # db.bulk_add_new_movies mein message_id automatically AUTO_MESSAGE_ID_PLACEHOLDER set ho jaayega.
         added_count, skipped_count = await db.bulk_add_new_movies(movie_list, target_channel_id)
 
         await message.answer(f"""✅ <b>Import Complete!</b>
