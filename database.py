@@ -177,7 +177,7 @@ class Database:
             pool_size=10, 
             max_overflow=20, 
             pool_pre_ping=True, 
-            pool_recycle=300, # Recycle every 5 minutes
+            pool_recycle=180,  # CRITICAL FIX: Reduced from 300s to 180s for better Free Tier resilience
             pool_timeout=15, 
         )
         
