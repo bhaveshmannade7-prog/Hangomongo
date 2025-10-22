@@ -82,7 +82,6 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
-    # NOTE: Membership check logic is often required but currently returns True in your code.
     return True 
 
 def get_join_keyboard():
@@ -123,23 +122,26 @@ aur abhi <b>{active_users}</b> active hain; nayi requests temporarily hold par h
 Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
     return msg
 
-# --- Keep DB alive ---
+# --- Keep DB alive (Aggressively to prevent idle state) ---
 async def keep_db_alive():
     """Keeps the database connection pool active by running a lightweight query."""
     while True:
-        # CRITICAL FIX: Keepalive time reduced to 180s (3 minutes) for free tier stability
-        await asyncio.sleep(180) 
+        # CRITICAL FIX: Keepalive time reduced to 60s (1 minute) for better free tier stability
+        await asyncio.sleep(60) 
         try:
+            # We don't care about the result, just that the connection works
             await db.get_user_count() 
-            logger.info("DB keepalive successful.") # FIX: Log level changed to INFO
+            logger.info("DB keepalive successful.")
         except Exception as e:
-            logger.error(f"DB keepalive failed: {e}", exc_info=True)
+            # If keepalive fails, the retry logic in database.py methods should handle it
+            logger.error(f"DB keepalive failed: {e}") 
 
 
 # --- Lifespan management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await db.init_db()
+    # init_db now has its own retry logic
+    await db.init_db() 
     db_task = asyncio.create_task(keep_db_alive()) 
 
     if WEBHOOK_URL:
@@ -171,7 +173,6 @@ app = FastAPI(lifespan=lifespan)
 
 async def _process_update(u: Update):
     try:
-        # Pass update to dispatcher
         await dp.feed_update(bot=bot, update=u)
     except Exception as e:
         logger.exception(f"feed_update failed: {e}")
@@ -185,7 +186,6 @@ async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: 
                 raise HTTPException(status_code=403, detail="Forbidden")
         
         telegram_update = Update(**update)
-        # Use add_task for non-blocking processing
         background_tasks.add_task(_process_update, telegram_update) 
         return {"ok": True}
     except Exception as e:
@@ -201,14 +201,12 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
     
-    # 1. Update activity (crucial for concurrency count)
+    # We must ensure DB can handle the user update before proceeding
     await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
 
-    # 2. Always allow admin
     if user_id == ADMIN_USER_ID:
         return True
     
-    # 3. Check Capacity
     active = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     if active > CURRENT_CONC_LIMIT: 
         await message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard())
@@ -217,6 +215,8 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     return True
 
 # --- Handlers ---
+# (start_command, help_command, check_join_callback handlers are the same)
+
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
     user_id = message.from_user.id
@@ -282,6 +282,7 @@ async def check_join_callback(callback: types.CallbackQuery):
     await callback.answer("Verifying…")
     
     # Update user activity and check capacity
+    # ensure_capacity_or_inform will handle user update and capacity check
     active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
     if active_users > CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
         try:
@@ -306,6 +307,7 @@ Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."""
         logger.error(f"check_join error: {e}", exc_info=True)
         await bot.send_message(callback.from_user.id, "⚠️ Technical error aya, kripya /start karein aur dobara koshish karein.")
 
+
 @dp.message(F.text & ~F.text.startswith("/") & (F.chat.type == "private"))
 async def search_movie_handler(message: types.Message):
     user_id = message.from_user.id
@@ -325,7 +327,7 @@ async def search_movie_handler(message: types.Message):
     searching_msg = await message.answer(f"🔍 <b>{original_query}</b> ki khoj jaari hai…")
     
     try:
-        # FIX: asyncio.wait_for hata diya gaya hai taaki heavy search logic ko time mil sake aur bot hang na ho.
+        # DB search has built-in retry logic now
         top = await db.super_search_movies_advanced(original_query, limit=20)
         
         if not top:
@@ -355,23 +357,21 @@ async def get_movie_callback(callback: types.CallbackQuery):
     if not await ensure_capacity_or_inform(callback.message):
         return
         
+    # DB call now has retry logic
     movie = await db.get_movie_by_imdb(imdb_id)
     if not movie:
         await callback.message.edit_text("❌ Yeh movie ab database me uplabdh nahi hai.")
         return
         
     try:
-        # Check if message_id is the placeholder for JSON imports
         if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER:
             
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
             
-            # CRITICAL FIX: Robust Triple Fallback for JSON imported files
-            # JSON imported files ko sirf file_id se hi bheja ja sakta hai.
             success = False
             final_error_message = ""
             
-            # 1. Attempt as Document (General fallback)
+            # 1. Attempt as Document
             try:
                 await bot.send_document(
                     chat_id=callback.from_user.id,
@@ -383,7 +383,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
                 final_error_message = doc_e.message
                 logger.warning(f"JSON Send (Doc) failed for {imdb_id}: {doc_e.message}")
                 
-                # 2. Attempt as Video (Agar Document fail ho gaya)
+                # 2. Attempt as Video
                 if not success:
                     try:
                         await bot.send_video(
@@ -396,17 +396,14 @@ async def get_movie_callback(callback: types.CallbackQuery):
                         final_error_message = vid_e.message
                         logger.warning(f"JSON Send (Vid) failed for {imdb_id}: {vid_e.message}")
                         
-                        # Note: Invalid message_id error se bachne ke liye forward_message ka attempt hata diya gaya hai.
-            
             if not success:
-                # Final failure message
                 await bot.send_message(
                     callback.from_user.id, 
                     f"❌ Maaf kijiye, <b>{movie['title']}</b> ki media file bhejte samay **final error** aaya. Aapka JSON file ID invalid ho chuka hai. \n\n**Note:** Kripya is movie ko channel par **forward** karke **`/add_movie`** se phir se index karein. ({final_error_message[:40]}...)"
                 )
 
         else:
-            # If message_id is original, use forward_message (fastest method)
+            # Original indexed file: use forward_message
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
             await bot.forward_message(
                 chat_id=callback.from_user.id,
@@ -416,14 +413,14 @@ async def get_movie_callback(callback: types.CallbackQuery):
         
     except TelegramAPIError as e:
         logger.error(f"Forward/edit error for {imdb_id}: {e}", exc_info=True)
-        # Detailed error message for user
         await bot.send_message(callback.from_user.id, f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward karne me dikat aayi. Shayad file channel se delete ho gayi ho ya bot ko channel se access na mil raha ho. Kripya phir se try karein.")
         
     except Exception as e:
         logger.error(f"Movie callback critical error: {e}", exc_info=True)
         await bot.send_message(callback.from_user.id, "❌ Critical system error: kripya /start karein.")
 
-# --- Admin Commands ---
+# (Admin commands are the same, they rely on the improved DB methods)
+
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
     await db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
@@ -512,7 +509,7 @@ async def add_movie_command(message: types.Message):
     if success:
         await message.answer(f"✅ Movie '<b>{title}</b>' add ho gayi hai.")
     else:
-        await message.answer("❌ Movie add karne me error aaya.")
+        await message.answer("❌ Movie add karne me error aaya (DB connection issue).")
 
 @dp.message(Command("import_json_movies"), AdminFilter())
 async def import_json_movies_command(message: types.Message):
@@ -551,10 +548,12 @@ async def import_json_movies_command(message: types.Message):
             
         await message.answer(f"⏳ <b>{len(movie_list)}</b> entries process ho rahi hain. Kripya intezaar karein.")
         
-        # db.bulk_add_new_movies mein message_id automatically AUTO_MESSAGE_ID_PLACEHOLDER set ho jaayega.
         added_count, skipped_count = await db.bulk_add_new_movies(movie_list, target_channel_id)
 
-        await message.answer(f"""✅ <b>Import Complete!</b>
+        if added_count == 0 and skipped_count == 0:
+            await message.answer("❌ Internal error while importing (DB connection issue). Check logs.")
+        else:
+            await message.answer(f"""✅ <b>Import Complete!</b>
 • Successfully Added: {added_count}
 • Already Exists (Skipped): {skipped_count}
 • Total Processed: {len(movie_list)}""")
@@ -583,6 +582,7 @@ async def export_csv_command(message: types.Message):
     try:
         if kind == "users":
             rows = await db.export_users(limit=limit)
+            if not rows: raise Exception("No user data or DB error.")
             header = """user_id,username,first_name,last_name,joined_date,last_active,is_active\n"""
             csv = header + "\n".join([
                 f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
@@ -591,6 +591,7 @@ async def export_csv_command(message: types.Message):
             await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="users.csv"), caption="Users export")
         else:
             rows = await db.export_movies(limit=limit)
+            if not rows: raise Exception("No movie data or DB error.")
             header = """imdb_id,title,year,channel_id,message_id,added_date\n"""
             csv = header + "\n".join([
                 f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
@@ -645,4 +646,4 @@ async def auto_index_handler(message: types.Message):
     if success:
         logger.info(f"Auto-indexed: {movie_info.get('title')}")
     else:
-        logger.error(f"Auto-index failed: {movie_info.get('title')}")
+        logger.error(f"Auto-index failed: {movie_info.get('title')} (DB connection issue).")
