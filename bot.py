@@ -19,6 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 
+# NOTE: Make sure the dependency is correctly imported
 from database import Database, clean_text_for_search, AUTO_MESSAGE_ID_PLACEHOLDER 
 
 # --- Configuration ---
@@ -125,7 +126,7 @@ Be-rukavat access ke liye alternate bots use karein; neeche se choose karke tura
 async def keep_db_alive():
     """Keeps the database connection pool active by running a lightweight query."""
     while True:
-        # Reduced from 240s to 180s to maintain activity on Free Tier
+        # CRITICAL FIX: Keepalive time reduced to 180s (3 minutes) for free tier stability
         await asyncio.sleep(180) 
         try:
             await db.get_user_count() 
@@ -374,34 +375,54 @@ async def get_movie_callback(callback: types.CallbackQuery):
             
             await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file bheji ja rahi hai, kripya chat check karein.")
             
-            # CRITICAL FIX (Final Attempt): Try to send as Document and Video.
-            # Agar file_id Invalid hai, to yeh fail hoga aur user ko inform karega.
+            # CRITICAL FIX: Robust Triple Fallback for JSON imported files
             success = False
+            final_error_message = ""
+            
+            # 1. Attempt as Document
             try:
-                # Attempt 1: Send as Document
                 await bot.send_document(
                     chat_id=callback.from_user.id,
                     document=movie["file_id"], 
                     caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
                 )
                 success = True
-            except TelegramBadRequest:
-                # Attempt 2: Send as Video (if it's a video file)
-                try:
-                    await bot.send_video(
-                        chat_id=callback.from_user.id,
-                        video=movie["file_id"],
-                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
-                    )
-                    success = True
-                except TelegramAPIError as final_e:
-                    logger.error(f"JSON File send failed for {imdb_id}: {final_e.message}", exc_info=True)
+            except TelegramBadRequest as doc_e:
+                final_error_message = doc_e.message
+                logger.warning(f"JSON Send (Doc) failed for {imdb_id}: {doc_e.message}")
+                
+                # 2. Attempt as Video
+                if not success:
+                    try:
+                        await bot.send_video(
+                            chat_id=callback.from_user.id,
+                            video=movie["file_id"],
+                            caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})"
+                        )
+                        success = True
+                    except TelegramBadRequest as vid_e:
+                        final_error_message = vid_e.message
+                        logger.warning(f"JSON Send (Vid) failed for {imdb_id}: {vid_e.message}")
+                        
+                        # 3. EXTREME FALLBACK: Try forwarding with placeholder message_id (Last resort)
+                        if not success:
+                            try:
+                                await bot.forward_message(
+                                    chat_id=callback.from_user.id,
+                                    from_chat_id=int(movie["channel_id"]),
+                                    # Yahan placeholder message_id use karna, agar file_id fail ho chuka ho
+                                    message_id=movie["message_id"], 
+                                )
+                                success = True
+                            except TelegramAPIError as forward_e:
+                                final_error_message = forward_e.message
+                                logger.error(f"JSON Send (Forward) failed for {imdb_id}: {forward_e.message}", exc_info=True)
             
             if not success:
                 # Final failure message
                 await bot.send_message(
                     callback.from_user.id, 
-                    f"❌ Maaf kijiye, <b>{movie['title']}</b> ki media file bhejte samay error aaya. Shayad yeh file Telegram se nikal di gayi hai ya iska file ID ab kaam nahi kar raha hai. \n\n**Note:** Jis JSON data se yeh movie import hui thi, usmein save kiya gaya File ID invalid ho chuka hai. Kripya is movie ko channel par **forward** karke **`/add_movie`** se phir se index karein."
+                    f"❌ Maaf kijiye, <b>{movie['title']}</b> ki media file bhejte samay **final error** aaya. Aapka JSON file ID invalid ho chuka hai. \n\n**Note:** Kripya is movie ko channel par **forward** karke **`/add_movie`** se phir se index karein. ({final_error_message[:40]}...)"
                 )
 
         else:
