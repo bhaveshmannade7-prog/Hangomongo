@@ -52,29 +52,34 @@ def generate_auto_info(movie_data: Dict, channel_id: int) -> Dict | None:
     Uses placeholder message_id for JSON imports.
     """
     
-    # 1. Map Title 
+    # 1. Map Title (title ya name/movie_name me se koi ek hona chahiye)
     title = movie_data.get("title") or movie_data.get("name") or movie_data.get("movie_name")
 
-    # 2. Map File ID
+    # 2. Map File ID (file_id ya file_ref/media_id me se koi ek hona chahiye)
     file_id = movie_data.get("file_id") or movie_data.get("file_ref") or movie_data.get("media_id")
 
+    # CRITICAL CHECK: Sirf title aur file_id chahiye
     if not title or not file_id:
         logger.warning(f"Skipping import: Title or File ID missing after mapping attempts: {movie_data}")
         return None
 
-    # 3. IMDB ID (Using a hash of title+file_id to ensure near-uniqueness)
-    hash_object = hashlib.sha1(f"{title}{file_id}".encode('utf-8'))
-    auto_imdb_id = f"auto_{hash_object.hexdigest()[:15]}" 
+    # 3. IMDB ID (Agar original IMDB ID nahi hai to hash use karo)
+    imdb_id = movie_data.get("imdb_id") 
+    if not imdb_id:
+        hash_object = hashlib.sha1(f"{title}{file_id}".encode('utf-8'))
+        imdb_id = f"auto_{hash_object.hexdigest()[:15]}" 
 
-    # 4. Year (Attempt to extract year from title)
-    year_match = re.search(r'\b(19|20)\d{2}\b', title)
-    year = year_match.group(0) if year_match else None
+    # 4. Year (Attempt to extract year from title, ya JSON se lo)
+    year = movie_data.get("year")
+    if not year:
+        year_match = re.search(r'\b(19|20)\d{2}\b', title)
+        year = year_match.group(0) if year_match else None
 
-    # 5. Message ID (Using the defined placeholder for JSON imports)
+    # 5. Message ID (Hamesha placeholder use karo JSON imported files ke liye)
     auto_message_id = AUTO_MESSAGE_ID_PLACEHOLDER  
 
     return {
-        "imdb_id": auto_imdb_id,
+        "imdb_id": imdb_id,
         "title": title,
         "year": year,
         "file_id": file_id,
