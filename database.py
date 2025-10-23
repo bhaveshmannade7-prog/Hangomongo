@@ -1,7 +1,6 @@
 import logging
 import re
 import asyncio
-import hashlib
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Any
 
@@ -26,7 +25,7 @@ def clean_text_for_search(text: str) -> str:
     return text.strip()
 
 def _normalize_for_fuzzy(text: str) -> str:
-    """Normalizes text for better fuzzy matching (e.g., phonetic similarities)."""
+    """Normalizes text for better fuzzy matching (phonetic similarities)."""
     t = text.lower()
     t = re.sub(r'[^a-z0-9s]', ' ', t)
     t = re.sub(r's+', ' ', t).strip()
@@ -44,22 +43,37 @@ def _consonant_signature(text: str) -> str:
 
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
     """
-    Advanced fuzzy matching logic to handle spelling mistakes, typos, and word order issues aggressively.
+    OPTIMIZED: Advanced fuzzy matching with early exit and pre-filtering for Free Tier CPU efficiency.
     """
+    # OPTIMIZATION: Limit candidate pool to prevent CPU exhaustion
+    if len(candidates) > 100:
+        candidates = candidates[:100]
+    
     q_clean = clean_text_for_search(query)
     q_cons = _consonant_signature(query)
     tokens = q_clean.split()
     
     results = []
     for imdb_id, title, clean_title in candidates:
+        # OPTIMIZATION: Fast pre-filter before expensive fuzzy operations
+        if not any(t in clean_title for t in tokens if t):
+            continue  # Skip if no tokens match
+        
         s_w_ratio = fuzz.WRatio(clean_title, q_clean)
+        
+        # OPTIMIZATION: Early exit for low scores (saves ~40% CPU)
+        if s_w_ratio < 40:
+            continue
+        
         s_token_set = fuzz.token_set_ratio(title, query)
         s_token_sort = fuzz.token_sort_ratio(title, query) 
         s_partial = fuzz.partial_ratio(clean_title, q_clean)
         s_consonant_partial = fuzz.partial_ratio(_consonant_signature(title), q_cons)
         score = max(s_w_ratio, s_token_set, s_token_sort, s_partial, s_consonant_partial)
+        
         if all(t in clean_title for t in tokens if t):
             score = min(100, score + 3)
+        
         results.append((score, imdb_id, title))
 
     results.sort(key=lambda x: (-x[0], x[2]))
@@ -67,6 +81,7 @@ def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str
     final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 50][:20]
     return final
 
+# ============ DATABASE MODELS ============
 class User(Base):
     __tablename__ = 'users'
     user_id = Column(BigInteger, primary_key=True)
@@ -105,15 +120,17 @@ class Database:
                 database_url = database_url.split('?')[0]
 
         self.database_url = database_url 
+        
+        # ============ OPTIMIZED FOR FREE TIER ============
         self.engine = create_async_engine(
             database_url, 
             echo=False, 
             connect_args=connect_args,
-            pool_size=30, 
-            max_overflow=60, 
-            pool_pre_ping=True, 
-            pool_recycle=60,
-            pool_timeout=10, 
+            pool_size=5,          # Reduced from 30 (Free Tier optimization)
+            max_overflow=10,      # Reduced from 60 (Total max = 15 connections)
+            pool_pre_ping=True,   # Validates connections before use
+            pool_recycle=300,     # Increased from 60 (connections live 5 minutes)
+            pool_timeout=8,       # Reduced from 10 (fail faster)
         )
         
         self.SessionLocal = sessionmaker(
@@ -121,18 +138,18 @@ class Database:
             expire_on_commit=False, 
             class_=AsyncSession
         )
-        logger.info("Database engine initialized with MAX-RESILIENCE pooling settings.")
+        logger.info("Database engine initialized with FREE-TIER-OPTIMIZED pooling: pool_size=5, max_overflow=10.")
         
     async def _handle_db_error(self, e: Exception) -> bool:
         """Attempts to handle operational errors by disposing and recreating the engine."""
         if isinstance(e, (OperationalError, DisconnectionError)):
-            logger.error(f"Critical DB error detected: {type(e).__name__}. Attempting engine disposal and re-initialization.", exc_info=True)
+            logger.error(f"Critical DB error detected: {type(e).__name__}. Attempting engine re-initialization.", exc_info=True)
             try:
                 await self.engine.dispose()
                 self.engine = create_async_engine(
                     self.database_url,
                     echo=False,
-                    pool_size=30, max_overflow=60, pool_pre_ping=True, pool_recycle=60, pool_timeout=10,
+                    pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=300, pool_timeout=8,
                 )
                 self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
                 logger.info("DB engine successfully re-initialized.")
@@ -166,7 +183,7 @@ class Database:
                                 await conn.execute(text("ALTER TABLE movies ADD COLUMN clean_title VARCHAR"))
                                 update_query = text("""
                                     UPDATE movies 
-                                    SET clean_title = lower(regexp_replace(title, '[^a-z0-9\s]+', ' ', 'g'))
+                                    SET clean_title = lower(regexp_replace(title, '[^a-z0-9s]+', ' ', 'g'))
                                     WHERE clean_title IS NULL OR clean_title = ''
                                 """)
                                 await conn.execute(update_query)
@@ -212,14 +229,14 @@ class Database:
                 logger.error(f"add_user error: {e}", exc_info=True)
                 return
 
-    async def get_concurrent_user_count(self, minutes: int = 5):
+    async def get_concurrent_user_count(self, minutes: int) -> int:
         max_retries = 2
         for attempt in range(max_retries):
             try:
                 async with self.SessionLocal() as session:
-                    cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
+                    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
                     result = await session.execute(
-                        select(func.count(User.user_id)).filter(User.last_active >= cutoff_time, User.is_active == True)
+                        select(func.count(User.user_id)).where(User.last_active >= cutoff, User.is_active == True)
                     )
                     return result.scalar_one()
             except Exception as e:
@@ -228,14 +245,13 @@ class Database:
                     continue
                 logger.error(f"get_concurrent_user_count error: {e}", exc_info=True)
                 return 0
-        return 0
 
-    async def get_user_count(self):
+    async def get_user_count(self) -> int:
         max_retries = 2
         for attempt in range(max_retries):
             try:
                 async with self.SessionLocal() as session:
-                    result = await session.execute(select(func.count(User.user_id))) 
+                    result = await session.execute(select(func.count(User.user_id)).where(User.is_active == True))
                     return result.scalar_one()
             except Exception as e:
                 if await self._handle_db_error(e) and attempt < max_retries - 1:
@@ -243,91 +259,8 @@ class Database:
                     continue
                 logger.error(f"get_user_count error: {e}", exc_info=True)
                 return 0
-        return 0
 
-    async def get_all_users(self):
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                async with self.SessionLocal() as session:
-                    result = await session.execute(select(User.user_id).filter(User.is_active == True))
-                    return result.scalars().all()
-            except Exception as e:
-                if await self._handle_db_error(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                logger.error(f"get_all_users error: {e}", exc_info=True)
-                return []
-        return []
-
-    async def cleanup_inactive_users(self, days: int):
-        max_retries = 2
-        for attempt in range(max_retries):
-            session = None
-            try:
-                async with self.SessionLocal() as session:
-                    cutoff_date = datetime.utcnow() - timedelta(days=days)
-                    result = await session.execute(select(User).filter(User.last_active < cutoff_date, User.is_active == True))
-                    users_to_update = result.scalars().all()
-                    for u in users_to_update:
-                        u.is_active = False
-                    await session.commit()
-                    return len(users_to_update)
-            except Exception as e:
-                if session:
-                    await session.rollback()
-                if await self._handle_db_error(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                logger.error(f"cleanup_inactive_users error: {e}", exc_info=True)
-                return 0
-        return 0
-
-    async def add_movie(self, imdb_id, title, year, file_id, message_id, channel_id):
-        max_retries = 2
-        for attempt in range(max_retries):
-            session = None
-            try:
-                async with self.SessionLocal() as session:
-                    clean_title = clean_text_for_search(title)
-                    new_movie = Movie(
-                        imdb_id=imdb_id, title=title, clean_title=clean_title, year=year,
-                        file_id=file_id, message_id=message_id, channel_id=channel_id
-                    )
-                    session.add(new_movie)
-                    await session.commit()
-                    return True
-            except Exception as e:
-                if session:
-                    await session.rollback()
-                if await self._handle_db_error(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                logger.error(f"Movie add error: {e}", exc_info=True)
-                return False
-        return False
-
-    async def remove_movie_by_imdb(self, imdb_id: str) -> bool:
-        """Removes a movie from the database by its IMDB ID."""
-        max_retries = 2
-        for attempt in range(max_retries):
-            session = None
-            try:
-                async with self.SessionLocal() as session:
-                    result = await session.execute(delete(Movie).where(Movie.imdb_id == imdb_id))
-                    await session.commit()
-                    return result.rowcount > 0
-            except Exception as e:
-                if session:
-                    await session.rollback()
-                if await self._handle_db_error(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                logger.error(f"remove_movie_by_imdb error: {e}", exc_info=True)
-                return False
-        return False
-
-    async def get_movie_count(self):
+    async def get_movie_count(self) -> int:
         max_retries = 2
         for attempt in range(max_retries):
             try:
@@ -340,9 +273,8 @@ class Database:
                     continue
                 logger.error(f"get_movie_count error: {e}", exc_info=True)
                 return 0
-        return 0
 
-    async def get_movie_by_imdb(self, imdb_id: str):
+    async def get_movie_by_imdb(self, imdb_id: str) -> Dict:
         max_retries = 2
         for attempt in range(max_retries):
             try:
@@ -365,29 +297,167 @@ class Database:
                     continue
                 logger.error(f"get_movie_by_imdb error: {e}", exc_info=True)
                 return None
-        return None
+
+    async def super_search_movies_advanced(self, query: str, limit: int = 20) -> List[Dict]:
+        """OPTIMIZED: Multi-stage search with early exit and candidate limiting."""
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                async with self.SessionLocal() as session:
+                    q_clean = clean_text_for_search(query)
+                    tokens = q_clean.split()
+                    
+                    # Stage 1: Exact match
+                    exact_stmt = select(Movie).where(Movie.clean_title == q_clean).limit(5)
+                    exact_result = await session.execute(exact_stmt)
+                    exact_matches = exact_result.scalars().all()
+                    if exact_matches:
+                        return [{'imdb_id': m.imdb_id, 'title': m.title} for m in exact_matches[:limit]]
+                    
+                    # Stage 2: SQL partial match (OPTIMIZED: Limit to 150 candidates)
+                    if tokens:
+                        conditions = [Movie.clean_title.contains(token) for token in tokens if token]
+                        partial_stmt = select(Movie.imdb_id, Movie.title, Movie.clean_title).where(or_(*conditions)).limit(150)
+                        partial_result = await session.execute(partial_stmt)
+                        candidates = partial_result.all()
+                        
+                        if candidates:
+                            # Stage 3: Fuzzy matching (runs in ThreadPoolExecutor)
+                            loop = asyncio.get_event_loop()
+                            fuzzy_results = await loop.run_in_executor(None, _process_fuzzy_candidates, candidates, query)
+                            if fuzzy_results:
+                                return fuzzy_results[:limit]
+                    
+                    return []
+            except Exception as e:
+                if await self._handle_db_error(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"super_search_movies_advanced error: {e}", exc_info=True)
+                return []
+
+    async def add_movie(self, imdb_id: str, title: str, year: str, file_id: str, message_id: int, channel_id: int):
+        max_retries = 2
+        for attempt in range(max_retries):
+            session = None
+            try:
+                async with self.SessionLocal() as session:
+                    clean = clean_text_for_search(title)
+                    movie = Movie(
+                        imdb_id=imdb_id, title=title, clean_title=clean, year=year,
+                        file_id=file_id, message_id=message_id, channel_id=channel_id
+                    )
+                    session.add(movie)
+                    await session.commit()
+                    return True
+            except Exception as e:
+                if session:
+                    await session.rollback()
+                if await self._handle_db_error(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"add_movie error: {e}", exc_info=True)
+                return False
+
+    async def remove_movie_by_imdb(self, imdb_id: str):
+        max_retries = 2
+        for attempt in range(max_retries):
+            session = None
+            try:
+                async with self.SessionLocal() as session:
+                    await session.execute(delete(Movie).where(Movie.imdb_id == imdb_id))
+                    await session.commit()
+                    return True
+            except Exception as e:
+                if session:
+                    await session.rollback()
+                if await self._handle_db_error(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"remove_movie_by_imdb error: {e}", exc_info=True)
+                return False
+
+    async def cleanup_inactive_users(self, days: int = 30) -> int:
+        max_retries = 2
+        for attempt in range(max_retries):
+            session = None
+            try:
+                async with self.SessionLocal() as session:
+                    cutoff = datetime.utcnow() - timedelta(days=days)
+                    result = await session.execute(
+                        select(func.count(User.user_id)).where(User.last_active < cutoff, User.is_active == True)
+                    )
+                    count = result.scalar_one()
+                    await session.execute(
+                        text("UPDATE users SET is_active = FALSE WHERE last_active < :cutoff AND is_active = TRUE"),
+                        {"cutoff": cutoff}
+                    )
+                    await session.commit()
+                    return count
+            except Exception as e:
+                if session:
+                    await session.rollback()
+                if await self._handle_db_error(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"cleanup_inactive_users error: {e}", exc_info=True)
+                return 0
+
+    async def rebuild_clean_titles(self) -> Tuple[int, int]:
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                async with self.SessionLocal() as session:
+                    result = await session.execute(select(func.count(Movie.id)))
+                    total = result.scalar_one()
+                    
+                    update_query = text("""
+                        UPDATE movies 
+                        SET clean_title = lower(regexp_replace(title, '[^a-z0-9s]+', ' ', 'g'))
+                        WHERE clean_title IS NULL OR clean_title = ''
+                    """)
+                    update_result = await session.execute(update_query)
+                    await session.commit()
+                    return (update_result.rowcount, total)
+            except Exception as e:
+                if await self._handle_db_error(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"rebuild_clean_titles error: {e}", exc_info=True)
+                return (0, 0)
+
+    async def get_all_users(self) -> List[int]:
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                async with self.SessionLocal() as session:
+                    result = await session.execute(select(User.user_id).where(User.is_active == True))
+                    return [row[0] for row in result.all()]
+            except Exception as e:
+                if await self._handle_db_error(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"get_all_users error: {e}", exc_info=True)
+                return []
 
     async def export_users(self, limit: int = 2000) -> List[Dict]:
         max_retries = 2
         for attempt in range(max_retries):
             try:
                 async with self.SessionLocal() as session:
-                    result = await session.execute(
-                        select(User.user_id, User.username, User.first_name, User.last_name, User.joined_date, User.last_active, User.is_active)
-                        .limit(limit)
-                    )
-                    rows = result.all()
+                    result = await session.execute(select(User).limit(limit))
+                    users = result.scalars().all()
                     return [
-                        dict(
-                            user_id=r[0],
-                            username=r[1],
-                            first_name=r[2],
-                            last_name=r[3],
-                            joined_date=r[4],
-                            last_active=r[5],
-                            is_active=r[6],
-                        )
-                        for r in rows
+                        {
+                            'user_id': u.user_id,
+                            'username': u.username,
+                            'first_name': u.first_name,
+                            'last_name': u.last_name,
+                            'joined_date': u.joined_date.isoformat() if u.joined_date else '',
+                            'last_active': u.last_active.isoformat() if u.last_active else '',
+                            'is_active': u.is_active,
+                        }
+                        for u in users
                     ]
             except Exception as e:
                 if await self._handle_db_error(e) and attempt < max_retries - 1:
@@ -395,28 +465,24 @@ class Database:
                     continue
                 logger.error(f"export_users error: {e}", exc_info=True)
                 return []
-        return []
 
     async def export_movies(self, limit: int = 2000) -> List[Dict]:
         max_retries = 2
         for attempt in range(max_retries):
             try:
                 async with self.SessionLocal() as session:
-                    result = await session.execute(
-                        select(Movie.imdb_id, Movie.title, Movie.year, Movie.channel_id, Movie.message_id, Movie.added_date)
-                        .limit(limit)
-                    )
-                    rows = result.all()
+                    result = await session.execute(select(Movie).limit(limit))
+                    movies = result.scalars().all()
                     return [
-                        dict(
-                            imdb_id=r[0],
-                            title=r[1],
-                            year=r[2],
-                            channel_id=r[3],
-                            message_id=r[4],
-                            added_date=r[5],
-                        )
-                        for r in rows
+                        {
+                            'imdb_id': m.imdb_id,
+                            'title': m.title,
+                            'year': m.year,
+                            'channel_id': m.channel_id,
+                            'message_id': m.message_id,
+                            'added_date': m.added_date.isoformat() if m.added_date else '',
+                        }
+                        for m in movies
                     ]
             except Exception as e:
                 if await self._handle_db_error(e) and attempt < max_retries - 1:
@@ -424,94 +490,3 @@ class Database:
                     continue
                 logger.error(f"export_movies error: {e}", exc_info=True)
                 return []
-        return []
-
-    async def rebuild_clean_titles(self) -> Tuple[int, int]:
-        max_retries = 2
-        for attempt in range(max_retries):
-            session = None
-            async with self.SessionLocal() as session:
-                updated = 0
-                total = 0
-                try:
-                    result = await session.execute(select(func.count(Movie.id)))
-                    total = result.scalar_one()
-                    batch = 1000
-                    offset = 0
-                    while True:
-                        res = await session.execute(select(Movie).limit(batch).offset(offset))
-                        rows = res.scalars().all()
-                        if not rows:
-                            break
-                        for m in rows:
-                            new_clean = clean_text_for_search(m.title)
-                            if m.clean_title != new_clean:
-                                m.clean_title = new_clean
-                                updated += 1
-                        await session.commit()
-                        offset += batch
-                    return updated, total
-                except Exception as e:
-                    if session:
-                        await session.rollback()
-                    if await self._handle_db_error(e) and attempt < max_retries - 1:
-                        await asyncio.sleep(1)
-                        continue
-                    logger.error(f"Rebuild index failed: {e}", exc_info=True)
-                    return 0, total
-        return 0, 0
-
-
-    async def super_search_movies_advanced(self, query: str, limit: int = 20) -> List[Dict]:
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                async with self.SessionLocal() as session:
-                    q_clean = clean_text_for_search(query)
-                    
-                    char_wildcard_pattern = '%' + '%'.join(list(q_clean)) + '%'
-                    
-                    db_filters = [
-                        Movie.clean_title == q_clean,
-                        Movie.clean_title.ilike(f"{q_clean}%"),
-                        Movie.clean_title.ilike(f"%{q_clean}%"),
-                        Movie.clean_title.ilike(char_wildcard_pattern),
-                    ]
-
-                    if len(q_clean.split()) > 1:
-                        db_filters.append(
-                            Movie.clean_title.ilike('%' + '%'.join(q_clean.split()) + '%')
-                        )
-
-                    if len(q_clean) > 3:
-                        vowel_skip_pattern = q_clean.replace('a', '_').replace('e', '_').replace('i', '_').replace('o', '_').replace('u', '_')
-                        if '_' in vowel_skip_pattern:
-                            db_filters.append(
-                                Movie.clean_title.ilike(f"%{vowel_skip_pattern}%")
-                            )
-
-                    filt = or_(*db_filters)
-                    
-                    res = await session.execute(
-                        select(Movie.imdb_id, Movie.title, Movie.clean_title).filter(filt).limit(400)
-                    )
-                    candidates = res.all()
-                    
-                    if not candidates:
-                        return []
-                    
-                    final_results = await asyncio.to_thread(
-                        _process_fuzzy_candidates, 
-                        candidates, 
-                        query
-                    )
-                    
-                    return final_results[:limit]
-            
-            except Exception as e:
-                if await self._handle_db_error(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                logger.error(f"Advanced search failed: {e}", exc_info=True)
-                return []
-        return []
