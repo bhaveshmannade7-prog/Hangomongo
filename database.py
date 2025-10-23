@@ -128,7 +128,6 @@ class Database:
         if isinstance(e, (OperationalError, DisconnectionError)):
             logger.error(f"Critical DB error detected: {type(e).__name__}. Attempting engine disposal and re-initialization.", exc_info=True)
             try:
-                # Dispose engine asynchronously
                 await self.engine.dispose()
                 self.engine = create_async_engine(
                     self.database_url,
