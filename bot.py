@@ -8,7 +8,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Dict
 from functools import wraps
-import concurrent.futures # For ThreadPoolExecutor
+import concurrent.futures
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
@@ -45,7 +45,7 @@ ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
 HANDLER_TIMEOUT = 25
 DB_OP_TIMEOUT = 10
-TG_OP_TIMEOUT = 5 
+TG_OP_TIMEOUT = 5 # Strict timeout for Telegram I/O operations
 
 if not BOT_TOKEN or not DATABASE_URL:
     logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
@@ -260,7 +260,11 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     
     active = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), timeout=5, default=0)
     if active > CURRENT_CONC_LIMIT: 
-        await safe_tg_call(message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard()))
+        # Use simple try/except for non-critical message sending to avoid deep nesting
+        try:
+            await asyncio.wait_for(message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard()), timeout=3)
+        except:
+            pass
         return False
         
     return True
@@ -269,8 +273,10 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
 @handler_timeout(20)
 async def start_command(message: types.Message):
     user_id = message.from_user.id
-    bot_info = await safe_tg_call(bot.get_me(), timeout=5)
-    if not bot_info:
+    # CRITICAL FIX: Direct await with strict timeout for critical TG call
+    try:
+        bot_info = await asyncio.wait_for(bot.get_me(), timeout=5)
+    except (asyncio.TimeoutError, TelegramAPIError):
         await safe_tg_call(message.answer("⚠️ Technical error - kripya dobara /start karein"))
         return
 
@@ -410,14 +416,14 @@ async def get_movie_callback(callback: types.CallbackQuery):
     
     # 1. Attempt to Forward (Primary method)
     try:
-        # Use strict timeout on Telegram API call to prevent event loop blocking
+        # CRITICAL FIX: Strict timeout on Telegram API call to prevent event loop blocking
         await asyncio.wait_for(
             bot.forward_message(
                 chat_id=callback.from_user.id,
                 from_chat_id=int(movie["channel_id"]),
                 message_id=movie["message_id"],
             ),
-            timeout=TG_OP_TIMEOUT # Strict 5s timeout
+            timeout=TG_OP_TIMEOUT 
         )
         success = True
         
