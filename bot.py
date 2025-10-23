@@ -3,7 +3,6 @@ import os
 import asyncio
 import logging
 import re
-import json 
 import io 
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -19,12 +18,9 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 
-# NOTE: Make sure the dependency is correctly imported
 from database import Database, clean_text_for_search, AUTO_MESSAGE_ID_PLACEHOLDER 
 
-# --- Configuration ---
 load_dotenv()
-# Setting logging to INFO to balance debugging and resource use on Free Tie
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bot")
 
@@ -67,7 +63,6 @@ dp = Dispatcher()
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
 
-# --- Filters & helpers ---
 class AdminFilter(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
         return message.from_user and (message.from_user.id == ADMIN_USER_ID)
@@ -122,7 +117,6 @@ aur abhi <b>{active_users}</b> active hain; nayi requests temporarily hold par h
 Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
     return msg
 
-# --- Keep DB alive (Aggressively to prevent idle state) ---
 async def keep_db_alive():
     """Keeps the database connection pool active by running a lightweight query."""
     while True:
@@ -134,7 +128,6 @@ async def keep_db_alive():
             logger.error(f"DB keepalive failed: {e}") 
 
 
-# --- Lifespan management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db() 
@@ -192,7 +185,6 @@ async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: 
 async def ping():
     return {"status": "ok", "service": "Movie Bot is Live", "uptime": get_uptime()}
 
-# --- Concurrency gate ---
 async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
@@ -208,8 +200,6 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
         return False
         
     return True
-
-# --- Handlers ---
 
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
@@ -236,6 +226,7 @@ Access Level: Full Management
 • /broadcast — Reply to message to send
 • /cleanup_users — Deactivate inactive users
 • /add_movie — Reply: /add_movie imdb_id | title | year
+• /remove_dead_movie IMDB_ID — Remove invalid movie
 • /rebuild_index — Recompute clean titles
 • /export_csv users|movies [limit]
 • /set_limit N — Change concurrency cap"""
@@ -353,48 +344,67 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     success = False
+    error_details = None
     
-    # 1. Attempt to Forward (Primary method)
     try:
         await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
-        await bot.forward_message(
-            chat_id=callback.from_user.id,
-            from_chat_id=int(movie["channel_id"]),
-            message_id=movie["message_id"],
+        
+        forward_task = asyncio.create_task(
+            bot.forward_message(
+                chat_id=callback.from_user.id,
+                from_chat_id=int(movie["channel_id"]),
+                message_id=movie["message_id"],
+            )
         )
+        await asyncio.wait_for(forward_task, timeout=3.0)
         success = True
         
-    except TelegramAPIError as e:
-        logger.error(f"Forward failed for {imdb_id}: {e}", exc_info=True)
+    except asyncio.TimeoutError:
+        logger.warning(f"FAST-FAIL: Forward timeout for {imdb_id} ({movie['title']})")
+        error_details = "timeout"
         
-        # 2. Fallback to send_document using file_id (Handles deleted messages and old JSON imports)
-        # We only try this if the error is specifically about the message not being found or if it's the old placeholder ID.
-        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in str(e).lower():
+    except TelegramBadRequest as e:
+        error_msg = str(e).lower()
+        logger.warning(f"FAST-FAIL: Forward failed for {imdb_id} ({movie['title']}): {e}")
+        error_details = error_msg
+        
+        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in error_msg:
             try:
-                # Attempt to send as document
-                await bot.send_document(
-                    chat_id=callback.from_user.id,
-                    document=movie["file_id"], 
-                    caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
+                doc_task = asyncio.create_task(
+                    bot.send_document(
+                        chat_id=callback.from_user.id,
+                        document=movie["file_id"], 
+                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
+                    )
                 )
+                await asyncio.wait_for(doc_task, timeout=3.0)
                 success = True
+                error_details = None
                 
-            except Exception as e2:
-                logger.error(f"Fallback send_document failed for {imdb_id}: {e2}", exc_info=True)
+            except asyncio.TimeoutError:
+                logger.warning(f"FAST-FAIL: Fallback send_document timeout for {imdb_id}")
+                error_details = "fallback_timeout"
                 
-    # 3. Final failure message
+            except TelegramBadRequest as e2:
+                logger.warning(f"FAST-FAIL: Fallback send_document failed for {imdb_id}: {e2}")
+                error_details = f"fallback_{str(e2).lower()}"
+                
+    except Exception as e:
+        logger.error(f"Unexpected error for {imdb_id}: {e}", exc_info=True)
+        error_details = "unexpected"
+                
     if not success:
+        logger.error(f"❌ ADMIN ACTION REQUIRED: Movie '{movie['title']}' (IMDB: {imdb_id}) failed delivery. Reason: {error_details}. Use: /remove_dead_movie {imdb_id}")
+        
         await bot.send_message(
             callback.from_user.id, 
-            f"❗️ Takneeki samasya: <b>{movie['title']}</b> ko forward/send karne me dikat aayi. Shayad file channel से delete हो गई हो या **File ID** अमान्य है। कॄपया `/add_movie` से re-index करे।"
+            f"❗️ <b>{movie['title']}</b> ki file uplabdh nahi hai (expired/deleted). Kripya admin ko contact karein."
         )
-        # Edit the callback message to reflect the failure
+        
         try:
-            await callback.message.edit_text(f"❌ <b>{movie['title']}</b> ko forward karne me error aaya. Upar chat check karein.")
+            await callback.message.edit_text(f"❌ <b>{movie['title']}</b> ki file send nahi ho payi.")
         except:
-             pass 
-
-# (Admin commands start here, they use the robust DB methods)
+            pass
 
 @dp.message(Command("stats"), AdminFilter())
 async def stats_command(message: types.Message):
@@ -486,6 +496,27 @@ async def add_movie_command(message: types.Message):
     else:
         await message.answer("❌ Movie add karne me error aaya (DB connection issue).")
 
+@dp.message(Command("remove_dead_movie"), AdminFilter())
+async def remove_dead_movie_command(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("❌ Use: /remove_dead_movie IMDB_ID")
+        return
+    
+    imdb_id = args[1].strip()
+    movie = await db.get_movie_by_imdb(imdb_id)
+    
+    if not movie:
+        await message.answer(f"❌ Movie with IMDB ID <code>{imdb_id}</code> not found in database.")
+        return
+    
+    success = await db.remove_movie_by_imdb(imdb_id)
+    
+    if success:
+        await message.answer(f"✅ Successfully removed movie: <b>{movie['title']}</b> (IMDB: {imdb_id})")
+        logger.info(f"Admin removed dead movie: {movie['title']} (IMDB: {imdb_id})")
+    else:
+        await message.answer(f"❌ Failed to remove movie (database error).")
 
 @dp.message(Command("rebuild_index"), AdminFilter())
 async def rebuild_index_command(message: types.Message):
