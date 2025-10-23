@@ -42,7 +42,7 @@ CURRENT_CONC_LIMIT = DEFAULT_CONCURRENT_LIMIT
 
 ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
-HANDLER_TIMEOUT = 25
+HANDLER_TIMEOUT = 25 # Kept for webhook safety
 DB_OP_TIMEOUT = 10
 TG_OP_TIMEOUT = 8
 
@@ -68,6 +68,7 @@ dp = Dispatcher()
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
 
+# --- Timeout Decorator (Minimally Invasive) ---
 def handler_timeout(timeout: int = HANDLER_TIMEOUT):
     """Decorator to add timeout to handlers to prevent hanging"""
     def decorator(func):
@@ -79,41 +80,44 @@ def handler_timeout(timeout: int = HANDLER_TIMEOUT):
                 logger.error(f"Handler {func.__name__} timed out after {timeout}s")
                 try:
                     if args and hasattr(args[0], 'answer'):
-                        await asyncio.wait_for(
-                            args[0].answer("⚠️ Request timeout - kripya dobara try karein."),
-                            timeout=3
-                        )
-                except Exception as e:
-                    logger.error(f"Error sending timeout message: {e}")
+                        # Use bot.send_message directly to avoid nested safe_tg_call
+                        await bot.send_message(args[0].from_user.id, "⚠️ Request timeout - kripya dobara try karein.", parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Handler {func.__name__} error: {e}", exc_info=True)
         return wrapper
     return decorator
 
+# --- Safe Wrappers (Simplified for efficiency) ---
 async def safe_db_call(coro, timeout=DB_OP_TIMEOUT, default=None):
-    """Safely execute database call with timeout"""
+    """Safely execute database call with timeout and simple failure return."""
     try:
-        return await asyncio.wait_for(coro, timeout=timeout)
+        # We rely on DB class's internal retry/reconnect logic.
+        return await asyncio.wait_for(coro, timeout=timeout) 
     except asyncio.TimeoutError:
         logger.error(f"DB operation timed out after {timeout}s")
         return default
     except Exception as e:
-        logger.error(f"DB operation error: {e}")
+        # DB class will have logged the root error; here we just return default.
+        logger.debug(f"DB operation error (handled internally): {e}") 
         return default
 
 async def safe_tg_call(coro, timeout=TG_OP_TIMEOUT):
-    """Safely execute Telegram API call with timeout"""
+    """Safely execute Telegram API call with timeout. Does NOT suppress TelegramAPIError."""
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning(f"Telegram API call timed out after {timeout}s")
         return None
-    except TelegramAPIError as e:
-        logger.warning(f"Telegram API error: {e}")
-        return None
     except Exception as e:
+        # CRITICAL FIX: Do NOT catch TelegramAPIError here, let the handler (e.g., get_movie_callback) catch it
+        if isinstance(e, TelegramAPIError):
+            raise e
         logger.error(f"Unexpected error in Telegram call: {e}")
         return None
+
+# --- Rest of the code is mostly the same, replacing generic calls with safe wrappers ---
 
 class AdminFilter(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
@@ -182,6 +186,7 @@ async def keep_db_alive():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # db.init_db is robust and already handles retries
     await db.init_db() 
     db_task = asyncio.create_task(keep_db_alive()) 
 
@@ -213,10 +218,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 async def _process_update(u: Update):
+    # Use standard dp.feed_update, let the handlers manage timeouts
     try:
-        await asyncio.wait_for(dp.feed_update(bot=bot, update=u), timeout=HANDLER_TIMEOUT)
-    except asyncio.TimeoutError:
-        logger.error(f"Update processing timed out for update {u.update_id}")
+        await dp.feed_update(bot=bot, update=u)
     except Exception as e:
         logger.exception(f"feed_update failed: {e}")
         
@@ -330,6 +334,7 @@ async def check_join_callback(callback: types.CallbackQuery):
     
     active_users = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), default=0)
     if active_users > CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
+        # We rely on safe_tg_call inside this block
         await safe_tg_call(callback.message.edit_text(overflow_message(active_users)))
         await safe_tg_call(bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard()))
         return
@@ -366,6 +371,7 @@ async def search_movie_handler(message: types.Message):
     if not searching_msg:
         return
     
+    # DB search is the longest operation, set a reasonable timeout
     top = await safe_db_call(db.super_search_movies_advanced(original_query, limit=20), timeout=15, default=[])
     
     if not top:
@@ -395,44 +401,54 @@ async def get_movie_callback(callback: types.CallbackQuery):
         return
         
     success = False
-    error_details = None
     
     await safe_tg_call(callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein."))
     
-    forward_result = await safe_tg_call(
-        bot.forward_message(
+    # --- CRITICAL FILE DELIVERY LOGIC ---
+    
+    # 1. Attempt to Forward (Primary method, allows message to fail fast)
+    try:
+        await bot.forward_message(
             chat_id=callback.from_user.id,
             from_chat_id=int(movie["channel_id"]),
             message_id=movie["message_id"],
-        ),
-        timeout=5
-    )
-    
-    if forward_result:
+        )
         success = True
-    else:
-        error_details = "forward_failed"
         
-        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER:
-            doc_result = await safe_tg_call(
-                bot.send_document(
+    except TelegramAPIError as e:
+        forward_failed_msg = str(e).lower()
+        logger.error(f"Forward failed for {imdb_id}: {e}")
+        
+        # 2. Fallback to send_document using file_id (If message not found or ID is placeholder)
+        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in forward_failed_msg or 'bad request: message to forward not found' in forward_failed_msg:
+            try:
+                # Attempt to send as document. This is the second-chance mechanism.
+                await bot.send_document(
                     chat_id=callback.from_user.id,
                     document=movie["file_id"], 
                     caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
-                ),
-                timeout=5
-            )
-            if doc_result:
+                )
                 success = True
-                error_details = None
                 
+            except TelegramAPIError as e2:
+                logger.error(f"Fallback send_document failed for {imdb_id}: {e2}")
+                # Log a failure that triggers Admin action
+                logger.error(f"❌ DEAD FILE: Movie '{movie['title']}' (IMDB: {imdb_id}) failed both forward and send_document. Use: /remove_dead_movie {imdb_id}")
+                
+            except Exception as e3:
+                logger.error(f"Unexpected error during send_document fallback for {imdb_id}: {e3}")
+                
+    # 3. Final failure message (If success is still False)
     if not success:
-        logger.error(f"❌ ADMIN: Movie '{movie['title']}' (IMDB: {imdb_id}) failed. Use: /remove_dead_movie {imdb_id}")
+        admin_hint = f"Admin Hint: /remove_dead_movie {imdb_id}" if callback.from_user.id == ADMIN_USER_ID else ""
+        
         await safe_tg_call(bot.send_message(
             callback.from_user.id, 
-            f"❗️ <b>{movie['title']}</b> ki file uplabdh nahi hai. Kripya admin ko contact karein."
+            f"❗️ Takneeki samasya: <b>{movie['title']}</b> ki file uplabdh nahi hai. File channel se delete ho chuki hai ya **File ID** invalid hai. {admin_hint}"
         ))
-        await safe_tg_call(callback.message.edit_text(f"❌ <b>{movie['title']}</b> ki file send nahi ho payi."))
+        
+        await safe_tg_call(callback.message.edit_text(f"❌ <b>{movie['title']}</b> ki file send nahi ho payi. Upar chat check karein."))
+
 
 @dp.message(Command("stats"), AdminFilter())
 @handler_timeout(15)
