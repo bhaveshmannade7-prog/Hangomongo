@@ -7,6 +7,7 @@ import io
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Dict
+from functools import wraps
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
@@ -41,6 +42,10 @@ CURRENT_CONC_LIMIT = DEFAULT_CONCURRENT_LIMIT
 
 ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
+HANDLER_TIMEOUT = 25
+DB_OP_TIMEOUT = 10
+TG_OP_TIMEOUT = 8
+
 if not BOT_TOKEN or not DATABASE_URL:
     logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
     raise SystemExit(1)
@@ -62,6 +67,53 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
+
+def handler_timeout(timeout: int = HANDLER_TIMEOUT):
+    """Decorator to add timeout to handlers to prevent hanging"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.error(f"Handler {func.__name__} timed out after {timeout}s")
+                try:
+                    if args and hasattr(args[0], 'answer'):
+                        await asyncio.wait_for(
+                            args[0].answer("⚠️ Request timeout - kripya dobara try karein."),
+                            timeout=3
+                        )
+                except Exception as e:
+                    logger.error(f"Error sending timeout message: {e}")
+            except Exception as e:
+                logger.error(f"Handler {func.__name__} error: {e}", exc_info=True)
+        return wrapper
+    return decorator
+
+async def safe_db_call(coro, timeout=DB_OP_TIMEOUT, default=None):
+    """Safely execute database call with timeout"""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error(f"DB operation timed out after {timeout}s")
+        return default
+    except Exception as e:
+        logger.error(f"DB operation error: {e}")
+        return default
+
+async def safe_tg_call(coro, timeout=TG_OP_TIMEOUT):
+    """Safely execute Telegram API call with timeout"""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"Telegram API call timed out after {timeout}s")
+        return None
+    except TelegramAPIError as e:
+        logger.warning(f"Telegram API error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in Telegram call: {e}")
+        return None
 
 class AdminFilter(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
@@ -122,8 +174,8 @@ async def keep_db_alive():
     while True:
         await asyncio.sleep(60) 
         try:
-            await db.get_user_count() 
-            logger.info("DB keepalive successful.")
+            count = await safe_db_call(db.get_user_count(), timeout=5, default=0)
+            logger.info(f"DB keepalive successful (users: {count}).")
         except Exception as e:
             logger.error(f"DB keepalive failed: {e}") 
 
@@ -162,7 +214,9 @@ app = FastAPI(lifespan=lifespan)
 
 async def _process_update(u: Update):
     try:
-        await dp.feed_update(bot=bot, update=u)
+        await asyncio.wait_for(dp.feed_update(bot=bot, update=u), timeout=HANDLER_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error(f"Update processing timed out for update {u.update_id}")
     except Exception as e:
         logger.exception(f"feed_update failed: {e}")
         
@@ -189,28 +243,35 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
     
-    await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+    await safe_db_call(
+        db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name),
+        timeout=5
+    )
 
     if user_id == ADMIN_USER_ID:
         return True
     
-    active = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
+    active = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), timeout=5, default=0)
     if active > CURRENT_CONC_LIMIT: 
-        await message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard())
+        await safe_tg_call(message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard()))
         return False
         
     return True
 
 @dp.message(CommandStart())
+@handler_timeout(20)
 async def start_command(message: types.Message):
     user_id = message.from_user.id
-    bot_info = await bot.get_me()
+    bot_info = await safe_tg_call(bot.get_me(), timeout=5)
+    if not bot_info:
+        await safe_tg_call(message.answer("⚠️ Technical error - kripya dobara /start karein"))
+        return
 
     if user_id == ADMIN_USER_ID:
-        await db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
-        user_count = await db.get_user_count()
-        movie_count = await db.get_movie_count()
-        concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
+        await safe_db_call(db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name))
+        user_count = await safe_db_call(db.get_user_count(), default=0)
+        movie_count = await safe_db_call(db.get_movie_count(), default=0)
+        concurrent_users = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), default=0)
         
         admin_message = f"""👑 <b>Admin Console: @{bot_info.username}</b>
 Access Level: Full Management
@@ -231,7 +292,7 @@ Access Level: Full Management
 • /export_csv users|movies [limit]
 • /set_limit N — Change concurrency cap"""
         
-        await message.answer(admin_message)
+        await safe_tg_call(message.answer(admin_message))
         return
 
     if not await ensure_capacity_or_inform(message):
@@ -244,11 +305,12 @@ Movie Search Bot me swagat hai — bas title ka naam bhejein; behtar results ke 
 Hamare Channel aur Group join karne ke baad niche "I Have Joined Both" dabayen aur turant access paayen.
 Aap help ke liye /help command bhi use kar sakte hain."""
     
-    await message.answer(welcome_text, reply_markup=get_join_keyboard())
+    await safe_tg_call(message.answer(welcome_text, reply_markup=get_join_keyboard()))
 
 @dp.message(Command("help"))
+@handler_timeout(15)
 async def help_command(message: types.Message):
-    await db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+    await safe_db_call(db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name))
     
     help_text = """❓ <b>Bot Ka Upyog Kaise Karein</b>
 
@@ -258,20 +320,18 @@ async def help_command(message: types.Message):
     
 Agar Bot slow ho ya ruk jaaye, toh <b>Alternate Bots</b> use karein jo /start karne par dikhte hain."""
     
-    await message.answer(help_text)
+    await safe_tg_call(message.answer(help_text))
 
 
 @dp.callback_query(F.data == "check_join")
+@handler_timeout(15)
 async def check_join_callback(callback: types.CallbackQuery):
-    await callback.answer("Verifying…")
+    await safe_tg_call(callback.answer("Verifying…"))
     
-    active_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
+    active_users = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), default=0)
     if active_users > CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
-        try:
-            await callback.message.edit_text(overflow_message(active_users))
-            await bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard())
-        except Exception:
-            pass 
+        await safe_tg_call(callback.message.edit_text(overflow_message(active_users)))
+        await safe_tg_call(bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard()))
         return
             
     success_text = f"""✅ Verification successful, <b>{callback.from_user.first_name}</b>!
@@ -280,22 +340,18 @@ Ab aap library access kar sakte hain — apni pasand ki title ka naam bhejein.
 
 Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."""
         
-    try:
-        await callback.message.edit_text(success_text, reply_markup=None)
-    except TelegramAPIError:
-        await bot.send_message(callback.from_user.id, success_text, reply_markup=None)
-            
-    except Exception as e:
-        logger.error(f"check_join error: {e}", exc_info=True)
-        await bot.send_message(callback.from_user.id, "⚠️ Technical error aya, kripya /start karein aur dobara koshish karein.")
+    result = await safe_tg_call(callback.message.edit_text(success_text, reply_markup=None))
+    if not result:
+        await safe_tg_call(bot.send_message(callback.from_user.id, success_text, reply_markup=None))
 
 
 @dp.message(F.text & ~F.text.startswith("/") & (F.chat.type == "private"))
+@handler_timeout(25)
 async def search_movie_handler(message: types.Message):
     user_id = message.from_user.id
 
     if not await check_user_membership(user_id):
-        await message.answer("⚠️ Kripya pehle Channel aur Group join karein, phir se /start dabayen.", reply_markup=get_join_keyboard())
+        await safe_tg_call(message.answer("⚠️ Kripya pehle Channel aur Group join karein, phir se /start dabayen.", reply_markup=get_join_keyboard()))
         return
 
     if not await ensure_capacity_or_inform(message):
@@ -303,115 +359,88 @@ async def search_movie_handler(message: types.Message):
 
     original_query = message.text.strip()
     if len(original_query) < 2:
-        await message.answer("🤔 Kripya kam se kam 2 characters ka query bhejein.")
+        await safe_tg_call(message.answer("🤔 Kripya kam se kam 2 characters ka query bhejein."))
         return
 
-    searching_msg = await message.answer(f"🔍 <b>{original_query}</b> ki khoj jaari hai…")
+    searching_msg = await safe_tg_call(message.answer(f"🔍 <b>{original_query}</b> ki khoj jaari hai…"))
+    if not searching_msg:
+        return
     
-    try:
-        top = await db.super_search_movies_advanced(original_query, limit=20)
-        
-        if not top:
-            await searching_msg.edit_text(
-                f"🥲 Maaf kijiye, <b>{original_query}</b> ke liye match nahi mila; spelling/variant try karein (jaise Katara/Katra)."
-            )
-            return
+    top = await safe_db_call(db.super_search_movies_advanced(original_query, limit=20), timeout=15, default=[])
+    
+    if not top:
+        await safe_tg_call(searching_msg.edit_text(
+            f"🥲 Maaf kijiye, <b>{original_query}</b> ke liye match nahi mila; spelling/variant try karein (jaise Katara/Katra)."
+        ))
+        return
 
-        buttons = [[InlineKeyboardButton(text=movie["title"], callback_data=f"get_{movie['imdb_id']}")] for movie in top]
-        await searching_msg.edit_text(
-            f"🎬 <b>{original_query}</b> ke liye {len(top)} results mile — file paane ke liye chunein:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        )
-            
-    except Exception as e:
-        logger.error(f"Search error for '{original_query}': {e}", exc_info=True) 
-        try:
-            await searching_msg.edit_text("❌ Internal error: search system me rukavat aa gayi hai, kuch der baad koshish karein.")
-        except TelegramAPIError:
-            pass
+    buttons = [[InlineKeyboardButton(text=movie["title"], callback_data=f"get_{movie['imdb_id']}")] for movie in top]
+    await safe_tg_call(searching_msg.edit_text(
+        f"🎬 <b>{original_query}</b> ke liye {len(top)} results mile — file paane ke liye chunein:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    ))
 
 @dp.callback_query(F.data.startswith("get_"))
+@handler_timeout(15)
 async def get_movie_callback(callback: types.CallbackQuery):
-    await callback.answer("File forward ki ja rahi hai…")
+    await safe_tg_call(callback.answer("File forward ki ja rahi hai…"))
     imdb_id = callback.data.split("_", 1)[1]
     
     if not await ensure_capacity_or_inform(callback.message):
         return
         
-    movie = await db.get_movie_by_imdb(imdb_id)
+    movie = await safe_db_call(db.get_movie_by_imdb(imdb_id), timeout=8)
     if not movie:
-        await callback.message.edit_text("❌ Yeh movie ab database me uplabdh nahi hai.")
+        await safe_tg_call(callback.message.edit_text("❌ Yeh movie ab database me uplabdh nahi hai."))
         return
         
     success = False
     error_details = None
     
-    try:
-        await callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein.")
-        
-        forward_task = asyncio.create_task(
-            bot.forward_message(
-                chat_id=callback.from_user.id,
-                from_chat_id=int(movie["channel_id"]),
-                message_id=movie["message_id"],
-            )
-        )
-        await asyncio.wait_for(forward_task, timeout=3.0)
+    await safe_tg_call(callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein."))
+    
+    forward_result = await safe_tg_call(
+        bot.forward_message(
+            chat_id=callback.from_user.id,
+            from_chat_id=int(movie["channel_id"]),
+            message_id=movie["message_id"],
+        ),
+        timeout=5
+    )
+    
+    if forward_result:
         success = True
+    else:
+        error_details = "forward_failed"
         
-    except asyncio.TimeoutError:
-        logger.warning(f"FAST-FAIL: Forward timeout for {imdb_id} ({movie['title']})")
-        error_details = "timeout"
-        
-    except TelegramBadRequest as e:
-        error_msg = str(e).lower()
-        logger.warning(f"FAST-FAIL: Forward failed for {imdb_id} ({movie['title']}): {e}")
-        error_details = error_msg
-        
-        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in error_msg:
-            try:
-                doc_task = asyncio.create_task(
-                    bot.send_document(
-                        chat_id=callback.from_user.id,
-                        document=movie["file_id"], 
-                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
-                    )
-                )
-                await asyncio.wait_for(doc_task, timeout=3.0)
+        if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER:
+            doc_result = await safe_tg_call(
+                bot.send_document(
+                    chat_id=callback.from_user.id,
+                    document=movie["file_id"], 
+                    caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
+                ),
+                timeout=5
+            )
+            if doc_result:
                 success = True
                 error_details = None
                 
-            except asyncio.TimeoutError:
-                logger.warning(f"FAST-FAIL: Fallback send_document timeout for {imdb_id}")
-                error_details = "fallback_timeout"
-                
-            except TelegramBadRequest as e2:
-                logger.warning(f"FAST-FAIL: Fallback send_document failed for {imdb_id}: {e2}")
-                error_details = f"fallback_{str(e2).lower()}"
-                
-    except Exception as e:
-        logger.error(f"Unexpected error for {imdb_id}: {e}", exc_info=True)
-        error_details = "unexpected"
-                
     if not success:
-        logger.error(f"❌ ADMIN ACTION REQUIRED: Movie '{movie['title']}' (IMDB: {imdb_id}) failed delivery. Reason: {error_details}. Use: /remove_dead_movie {imdb_id}")
-        
-        await bot.send_message(
+        logger.error(f"❌ ADMIN: Movie '{movie['title']}' (IMDB: {imdb_id}) failed. Use: /remove_dead_movie {imdb_id}")
+        await safe_tg_call(bot.send_message(
             callback.from_user.id, 
-            f"❗️ <b>{movie['title']}</b> ki file uplabdh nahi hai (expired/deleted). Kripya admin ko contact karein."
-        )
-        
-        try:
-            await callback.message.edit_text(f"❌ <b>{movie['title']}</b> ki file send nahi ho payi.")
-        except:
-            pass
+            f"❗️ <b>{movie['title']}</b> ki file uplabdh nahi hai. Kripya admin ko contact karein."
+        ))
+        await safe_tg_call(callback.message.edit_text(f"❌ <b>{movie['title']}</b> ki file send nahi ho payi."))
 
 @dp.message(Command("stats"), AdminFilter())
+@handler_timeout(15)
 async def stats_command(message: types.Message):
-    await db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
-    user_count = await db.get_user_count()
-    movie_count = await db.get_movie_count()
-    concurrent_users = await db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES)
+    await safe_db_call(db.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name))
+    user_count = await safe_db_call(db.get_user_count(), default=0)
+    movie_count = await safe_db_call(db.get_movie_count(), default=0)
+    concurrent_users = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), default=0)
     
     stats_msg = f"""📊 <b>Live System Statistics</b>
 
@@ -421,156 +450,165 @@ async def stats_command(message: types.Message):
 ⚙️ Status: Operational
 ⏰ Uptime: {get_uptime()}"""
     
-    await message.answer(stats_msg)
+    await safe_tg_call(message.answer(stats_msg))
 
 @dp.message(Command("broadcast"), AdminFilter())
+@handler_timeout(600)
 async def broadcast_command(message: types.Message):
     if not message.reply_to_message:
-        await message.answer("❌ Broadcast ke liye kisi message ko reply karein.")
+        await safe_tg_call(message.answer("❌ Broadcast ke liye kisi message ko reply karein."))
         return
-    users = await db.get_all_users()
+    users = await safe_db_call(db.get_all_users(), timeout=10, default=[])
     total_users = len(users)
     success, failed = 0, 0
     
-    progress_msg = await message.answer(f"📤 Broadcasting to <b>{total_users}</b> users…")
+    progress_msg = await safe_tg_call(message.answer(f"📤 Broadcasting to <b>{total_users}</b> users…"))
     
-    try:
-        for uid in users:
-            try:
-                await message.reply_to_message.copy_to(uid)
-                success += 1
-            except Exception as e:
-                failed += 1
-                logger.debug(f"Broadcast failed for user {uid}: {e}")
-            if (success + failed) % 100 == 0 and (success + failed) > 0:
-                await progress_msg.edit_text(f"""📤 Broadcasting…
-✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}""")
-            await asyncio.sleep(0.05) 
+    for uid in users:
+        result = await safe_tg_call(message.reply_to_message.copy_to(uid), timeout=3)
+        if result:
+            success += 1
+        else:
+            failed += 1
             
-        await progress_msg.edit_text(f"""✅ <b>Broadcast Complete!</b>
+        if (success + failed) % 100 == 0 and (success + failed) > 0 and progress_msg:
+            await safe_tg_call(progress_msg.edit_text(f"""📤 Broadcasting…
+✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}"""))
+        await asyncio.sleep(0.05) 
+        
+    if progress_msg:
+        await safe_tg_call(progress_msg.edit_text(f"""✅ <b>Broadcast Complete!</b>
 
 • Success: {success}
-• Failed: {failed}""")
-        
-    except Exception as e:
-        logger.error(f"Broadcast failed: {e}", exc_info=True)
-        await message.answer("❌ Broadcasting process mein rukawat aa gayi.")
+• Failed: {failed}"""))
 
 @dp.message(Command("cleanup_users"), AdminFilter())
+@handler_timeout(30)
 async def cleanup_users_command(message: types.Message):
-    await message.answer("🧹 Inactive users ko clean kiya ja raha hai…")
-    removed_count = await db.cleanup_inactive_users(days=30)
-    new_count = await db.get_user_count()
+    await safe_tg_call(message.answer("🧹 Inactive users ko clean kiya ja raha hai…"))
+    removed_count = await safe_db_call(db.cleanup_inactive_users(days=30), timeout=15, default=0)
+    new_count = await safe_db_call(db.get_user_count(), default=0)
     
-    await message.answer(f"""✅ <b>Cleanup complete!</b>
+    await safe_tg_call(message.answer(f"""✅ <b>Cleanup complete!</b>
 • Deactivated: {removed_count}
-• Active Users now: {new_count}""")
+• Active Users now: {new_count}"""))
 
 @dp.message(Command("add_movie"), AdminFilter())
+@handler_timeout(20)
 async def add_movie_command(message: types.Message):
     if not message.reply_to_message or not (message.reply_to_message.video or message.reply_to_message.document):
-        await message.answer("❌ Kripya video/document par reply karke command bhejein: /add_movie imdb_id | title | year")
+        await safe_tg_call(message.answer("❌ Kripya video/document par reply karke command bhejein: /add_movie imdb_id | title | year"))
         return
     try:
         full_command = message.text.replace("/add_movie", "", 1).strip()
         parts = [p.strip() for p in full_command.split("|")]
         if len(parts) < 2:
-            await message.answer("❌ Format galat hai; use: /add_movie imdb_id | title | year")
+            await safe_tg_call(message.answer("❌ Format galat hai; use: /add_movie imdb_id | title | year"))
             return
         imdb_id = parts[0]
         title = parts[1]
         year = parts[2] if len(parts) > 2 else None
     except Exception:
-        await message.answer("❌ Format galat hai; use: /add_movie imdb_id | title | year")
+        await safe_tg_call(message.answer("❌ Format galat hai; use: /add_movie imdb_id | title | year"))
         return
-    if await db.get_movie_by_imdb(imdb_id):
-        await message.answer("⚠️ Is IMDB ID se movie pehle se maujood hai.")
+        
+    existing = await safe_db_call(db.get_movie_by_imdb(imdb_id))
+    if existing:
+        await safe_tg_call(message.answer("⚠️ Is IMDB ID se movie pehle se maujood hai."))
         return
+        
     file_id = message.reply_to_message.video.file_id if message.reply_to_message.video else message.reply_to_message.document.file_id
-    success = await db.add_movie(
+    success = await safe_db_call(db.add_movie(
         imdb_id=imdb_id, title=title, year=year,
         file_id=file_id, message_id=message.reply_to_message.message_id, channel_id=message.reply_to_message.chat.id
-    )
+    ), default=False)
+    
     if success:
-        await message.answer(f"✅ Movie '<b>{title}</b>' add ho gayi hai.")
+        await safe_tg_call(message.answer(f"✅ Movie '<b>{title}</b>' add ho gayi hai."))
     else:
-        await message.answer("❌ Movie add karne me error aaya (DB connection issue).")
+        await safe_tg_call(message.answer("❌ Movie add karne me error aaya (DB connection issue)."))
 
 @dp.message(Command("remove_dead_movie"), AdminFilter())
+@handler_timeout(15)
 async def remove_dead_movie_command(message: types.Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ Use: /remove_dead_movie IMDB_ID")
+        await safe_tg_call(message.answer("❌ Use: /remove_dead_movie IMDB_ID"))
         return
     
     imdb_id = args[1].strip()
-    movie = await db.get_movie_by_imdb(imdb_id)
+    movie = await safe_db_call(db.get_movie_by_imdb(imdb_id))
     
     if not movie:
-        await message.answer(f"❌ Movie with IMDB ID <code>{imdb_id}</code> not found in database.")
+        await safe_tg_call(message.answer(f"❌ Movie with IMDB ID <code>{imdb_id}</code> not found in database."))
         return
     
-    success = await db.remove_movie_by_imdb(imdb_id)
+    success = await safe_db_call(db.remove_movie_by_imdb(imdb_id), default=False)
     
     if success:
-        await message.answer(f"✅ Successfully removed movie: <b>{movie['title']}</b> (IMDB: {imdb_id})")
+        await safe_tg_call(message.answer(f"✅ Successfully removed movie: <b>{movie['title']}</b> (IMDB: {imdb_id})"))
         logger.info(f"Admin removed dead movie: {movie['title']} (IMDB: {imdb_id})")
     else:
-        await message.answer(f"❌ Failed to remove movie (database error).")
+        await safe_tg_call(message.answer(f"❌ Failed to remove movie (database error)."))
 
 @dp.message(Command("rebuild_index"), AdminFilter())
+@handler_timeout(300)
 async def rebuild_index_command(message: types.Message):
-    await message.answer("🔧 Clean titles reindex ho रहे हैं… yeh operation batched hai.")
-    updated, total = await db.rebuild_clean_titles()
-    await message.answer(f"✅ Reindex complete: Updated <b>{updated}</b> of ~{total} titles. Ab search feature tez aur sahi kaam karega.")
+    await safe_tg_call(message.answer("🔧 Clean titles reindex ho रहे हैं… yeh operation batched hai."))
+    result = await safe_db_call(db.rebuild_clean_titles(), timeout=180, default=(0, 0))
+    updated, total = result
+    await safe_tg_call(message.answer(f"✅ Reindex complete: Updated <b>{updated}</b> of ~{total} titles. Ab search feature tez aur sahi kaam karega."))
 
 @dp.message(Command("export_csv"), AdminFilter())
+@handler_timeout(60)
 async def export_csv_command(message: types.Message):
     args = message.text.split()
     if len(args) < 2 or args[1] not in ("users", "movies"):
-        await message.answer("Use: /export_csv users|movies [limit]")
+        await safe_tg_call(message.answer("Use: /export_csv users|movies [limit]"))
         return
     kind = args[1]
     limit = int(args[2]) if len(args) > 2 and args[2].isdigit() else 2000
-    try:
-        if kind == "users":
-            rows = await db.export_users(limit=limit)
-            if not rows: raise Exception("No user data or DB error.")
-            header = """user_id,username,first_name,last_name,joined_date,last_active,is_active\n"""
-            csv = header + "\n".join([
-                f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
-                for r in rows
-            ])
-            await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="users.csv"), caption="Users export")
-        else:
-            rows = await db.export_movies(limit=limit)
-            if not rows: raise Exception("No movie data or DB error.")
-            header = """imdb_id,title,year,channel_id,message_id,added_date\n"""
-            csv = header + "\n".join([
-                f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
-                for r in rows
-            ])
-            await message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="movies.csv"), caption="Movies export")
-            
-    except Exception as e:
-        logger.error(f"Export CSV failed: {e}", exc_info=True)
-        await message.answer("❌ Data export karne me internal error aaya.")
+    
+    if kind == "users":
+        rows = await safe_db_call(db.export_users(limit=limit), timeout=30, default=[])
+        if not rows:
+            await safe_tg_call(message.answer("❌ No user data or DB error."))
+            return
+        header = """user_id,username,first_name,last_name,joined_date,last_active,is_active\n"""
+        csv = header + "\n".join([
+            f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
+            for r in rows
+        ])
+        await safe_tg_call(message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="users.csv"), caption="Users export"))
+    else:
+        rows = await safe_db_call(db.export_movies(limit=limit), timeout=30, default=[])
+        if not rows:
+            await safe_tg_call(message.answer("❌ No movie data or DB error."))
+            return
+        header = """imdb_id,title,year,channel_id,message_id,added_date\n"""
+        csv = header + "\n".join([
+            f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
+            for r in rows
+        ])
+        await safe_tg_call(message.answer_document(BufferedInputFile(csv.encode("utf-8"), filename="movies.csv"), caption="Movies export"))
 
 @dp.message(Command("set_limit"), AdminFilter())
+@handler_timeout(10)
 async def set_limit_command(message: types.Message):
     global CURRENT_CONC_LIMIT
     args = message.text.split()
     if len(args) < 2 or not args[1].isdigit():
-        await message.answer(f"Use: /set_limit N (current: {CURRENT_CONC_LIMIT})")
+        await safe_tg_call(message.answer(f"Use: /set_limit N (current: {CURRENT_CONC_LIMIT})"))
         return
     val = int(args[1])
     if val < 5 or val > 100:
-        await message.answer("Allowed range: 5–100 for safety on free tier.")
+        await safe_tg_call(message.answer("Allowed range: 5–100 for safety on free tier."))
         return
     CURRENT_CONC_LIMIT = val
-    await message.answer(f"✅ Concurrency limit set to <b>{CURRENT_CONC_LIMIT}</b>")
+    await safe_tg_call(message.answer(f"✅ Concurrency limit set to <b>{CURRENT_CONC_LIMIT}</b>"))
 
 @dp.channel_post()
+@handler_timeout(20)
 async def auto_index_handler(message: types.Message):
     if message.chat.id != LIBRARY_CHANNEL_ID or not (message.video or message.document):
         return
@@ -581,21 +619,22 @@ async def auto_index_handler(message: types.Message):
         return
     
     file_id = message.video.file_id if message.video else message.document.file_id
-    
     imdb_id = movie_info.get("imdb_id", f"auto_{message.message_id}") 
     
-    if await db.get_movie_by_imdb(imdb_id):
+    existing = await safe_db_call(db.get_movie_by_imdb(imdb_id))
+    if existing:
         logger.info(f"Movie already indexed: {movie_info.get('title')}")
         return
         
-    success = await db.add_movie(
+    success = await safe_db_call(db.add_movie(
         imdb_id=imdb_id,
         title=movie_info.get("title"),
         year=movie_info.get("year"),
         file_id=file_id,
         message_id=message.message_id,
         channel_id=message.chat.id,
-    )
+    ), default=False)
+    
     if success:
         logger.info(f"Auto-indexed: {movie_info.get('title')}")
     else:
