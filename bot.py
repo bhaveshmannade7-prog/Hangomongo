@@ -42,9 +42,10 @@ CURRENT_CONC_LIMIT = DEFAULT_CONCURRENT_LIMIT
 
 ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
-HANDLER_TIMEOUT = 25 # Kept for webhook safety
+HANDLER_TIMEOUT = 25
 DB_OP_TIMEOUT = 10
-TG_OP_TIMEOUT = 8
+# CRITICAL FIX: Telegram operations must fail fast to prevent event loop blocking
+TG_OP_TIMEOUT = 5 
 
 if not BOT_TOKEN or not DATABASE_URL:
     logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
@@ -68,7 +69,7 @@ dp = Dispatcher()
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
 
-# --- Timeout Decorator (Minimally Invasive) ---
+# --- Timeout Decorator ---
 def handler_timeout(timeout: int = HANDLER_TIMEOUT):
     """Decorator to add timeout to handlers to prevent hanging"""
     def decorator(func):
@@ -89,17 +90,15 @@ def handler_timeout(timeout: int = HANDLER_TIMEOUT):
         return wrapper
     return decorator
 
-# --- Safe Wrappers (Simplified for efficiency) ---
+# --- Safe Wrappers ---
 async def safe_db_call(coro, timeout=DB_OP_TIMEOUT, default=None):
     """Safely execute database call with timeout and simple failure return."""
     try:
-        # We rely on DB class's internal retry/reconnect logic.
         return await asyncio.wait_for(coro, timeout=timeout) 
     except asyncio.TimeoutError:
         logger.error(f"DB operation timed out after {timeout}s")
         return default
     except Exception as e:
-        # DB class will have logged the root error; here we just return default.
         logger.debug(f"DB operation error (handled internally): {e}") 
         return default
 
@@ -111,13 +110,10 @@ async def safe_tg_call(coro, timeout=TG_OP_TIMEOUT):
         logger.warning(f"Telegram API call timed out after {timeout}s")
         return None
     except Exception as e:
-        # CRITICAL FIX: Do NOT catch TelegramAPIError here, let the handler (e.g., get_movie_callback) catch it
         if isinstance(e, TelegramAPIError):
             raise e
         logger.error(f"Unexpected error in Telegram call: {e}")
         return None
-
-# --- Rest of the code is mostly the same, replacing generic calls with safe wrappers ---
 
 class AdminFilter(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
@@ -186,7 +182,6 @@ async def keep_db_alive():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # db.init_db is robust and already handles retries
     await db.init_db() 
     db_task = asyncio.create_task(keep_db_alive()) 
 
@@ -218,8 +213,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 async def _process_update(u: Update):
-    # Use standard dp.feed_update, let the handlers manage timeouts
     try:
+        # Use standard dp.feed_update, let the handlers manage timeouts
         await dp.feed_update(bot=bot, update=u)
     except Exception as e:
         logger.exception(f"feed_update failed: {e}")
@@ -334,7 +329,6 @@ async def check_join_callback(callback: types.CallbackQuery):
     
     active_users = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), default=0)
     if active_users > CURRENT_CONC_LIMIT and callback.from_user.id != ADMIN_USER_ID:
-        # We rely on safe_tg_call inside this block
         await safe_tg_call(callback.message.edit_text(overflow_message(active_users)))
         await safe_tg_call(bot.send_message(callback.from_user.id, "Alternate bots ka upyog karein:", reply_markup=get_full_limit_keyboard()))
         return
@@ -406,39 +400,45 @@ async def get_movie_callback(callback: types.CallbackQuery):
     
     # --- CRITICAL FILE DELIVERY LOGIC ---
     
-    # 1. Attempt to Forward (Primary method, allows message to fail fast)
+    # 1. Attempt to Forward (Primary method)
     try:
-        await bot.forward_message(
-            chat_id=callback.from_user.id,
-            from_chat_id=int(movie["channel_id"]),
-            message_id=movie["message_id"],
+        # Strict timeout on Telegram API call to prevent event loop blocking
+        await asyncio.wait_for(
+            bot.forward_message(
+                chat_id=callback.from_user.id,
+                from_chat_id=int(movie["channel_id"]),
+                message_id=movie["message_id"],
+            ),
+            timeout=TG_OP_TIMEOUT # Use the strict TG_OP_TIMEOUT (5s)
         )
         success = True
         
-    except TelegramAPIError as e:
+    except (asyncio.TimeoutError, TelegramAPIError) as e:
         forward_failed_msg = str(e).lower()
         logger.error(f"Forward failed for {imdb_id}: {e}")
         
-        # 2. Fallback to send_document using file_id (If message not found or ID is placeholder)
+        # 2. Fallback to send_document using file_id 
         if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in forward_failed_msg or 'bad request: message to forward not found' in forward_failed_msg:
             try:
-                # Attempt to send as document. This is the second-chance mechanism.
-                await bot.send_document(
-                    chat_id=callback.from_user.id,
-                    document=movie["file_id"], 
-                    caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
+                # Use strict timeout for send_document to prevent event loop blocking
+                await asyncio.wait_for(
+                    bot.send_document(
+                        chat_id=callback.from_user.id,
+                        document=movie["file_id"], 
+                        caption=f"🎬 <b>{movie['title']}</b> ({movie['year'] or 'Year not specified'})" 
+                    ),
+                    timeout=TG_OP_TIMEOUT 
                 )
                 success = True
                 
-            except TelegramAPIError as e2:
-                logger.error(f"Fallback send_document failed for {imdb_id}: {e2}")
-                # Log a failure that triggers Admin action
-                logger.error(f"❌ DEAD FILE: Movie '{movie['title']}' (IMDB: {imdb_id}) failed both forward and send_document. Use: /remove_dead_movie {imdb_id}")
+            except (asyncio.TimeoutError, TelegramAPIError) as e2:
+                # This is the final dead file log entry
+                logger.error(f"❌ DEAD FILE: Movie '{movie['title']}' (IMDB: {imdb_id}) failed both forward and send_document. Error: {type(e2).__name__}. Use: /remove_dead_movie {imdb_id}")
                 
             except Exception as e3:
                 logger.error(f"Unexpected error during send_document fallback for {imdb_id}: {e3}")
                 
-    # 3. Final failure message (If success is still False)
+    # 3. Final failure message
     if not success:
         admin_hint = f"Admin Hint: /remove_dead_movie {imdb_id}" if callback.from_user.id == ADMIN_USER_ID else ""
         
