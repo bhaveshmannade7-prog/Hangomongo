@@ -8,6 +8,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Dict
 from functools import wraps
+import concurrent.futures # For ThreadPoolExecutor
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, BaseFilter
@@ -44,7 +45,6 @@ ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
 HANDLER_TIMEOUT = 25
 DB_OP_TIMEOUT = 10
-# CRITICAL FIX: Telegram operations must fail fast to prevent event loop blocking
 TG_OP_TIMEOUT = 5 
 
 if not BOT_TOKEN or not DATABASE_URL:
@@ -81,7 +81,6 @@ def handler_timeout(timeout: int = HANDLER_TIMEOUT):
                 logger.error(f"Handler {func.__name__} timed out after {timeout}s")
                 try:
                     if args and hasattr(args[0], 'answer'):
-                        # Use bot.send_message directly to avoid nested safe_tg_call
                         await bot.send_message(args[0].from_user.id, "⚠️ Request timeout - kripya dobara try karein.", parse_mode=ParseMode.HTML)
                 except Exception:
                     pass
@@ -182,6 +181,12 @@ async def keep_db_alive():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # CRITICAL FIX 1: Increase the default executor size for CPU-bound tasks (Fuzzy Search)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=50) 
+    loop = asyncio.get_event_loop()
+    loop.set_default_executor(executor)
+    logger.info("Custom ThreadPoolExecutor initialized with max_workers=50.")
+    
     await db.init_db() 
     db_task = asyncio.create_task(keep_db_alive()) 
 
@@ -209,12 +214,15 @@ async def lifespan(app: FastAPI):
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         logger.error(f"Webhook delete error: {e}", exc_info=True)
+        
+    # CRITICAL FIX 2: Shutdown the executor gracefully
+    executor.shutdown(wait=False)
+    logger.info("ThreadPoolExecutor shut down.")
 
 app = FastAPI(lifespan=lifespan)
 
 async def _process_update(u: Update):
     try:
-        # Use standard dp.feed_update, let the handlers manage timeouts
         await dp.feed_update(bot=bot, update=u)
     except Exception as e:
         logger.exception(f"feed_update failed: {e}")
@@ -402,14 +410,14 @@ async def get_movie_callback(callback: types.CallbackQuery):
     
     # 1. Attempt to Forward (Primary method)
     try:
-        # Strict timeout on Telegram API call to prevent event loop blocking
+        # Use strict timeout on Telegram API call to prevent event loop blocking
         await asyncio.wait_for(
             bot.forward_message(
                 chat_id=callback.from_user.id,
                 from_chat_id=int(movie["channel_id"]),
                 message_id=movie["message_id"],
             ),
-            timeout=TG_OP_TIMEOUT # Use the strict TG_OP_TIMEOUT (5s)
+            timeout=TG_OP_TIMEOUT # Strict 5s timeout
         )
         success = True
         
@@ -417,7 +425,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
         forward_failed_msg = str(e).lower()
         logger.error(f"Forward failed for {imdb_id}: {e}")
         
-        # 2. Fallback to send_document using file_id 
+        # 2. Fallback to send_document using file_id (If message not found or ID is placeholder)
         if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in forward_failed_msg or 'bad request: message to forward not found' in forward_failed_msg:
             try:
                 # Use strict timeout for send_document to prevent event loop blocking
