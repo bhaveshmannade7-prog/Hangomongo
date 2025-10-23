@@ -3,7 +3,8 @@ import os
 import asyncio
 import logging
 import re
-import io 
+import io
+import signal
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Dict
@@ -26,6 +27,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bot")
 
+# ============ CONFIGURATION ============
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "123456789")) 
 LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", "-1003138949015"))
@@ -43,9 +45,13 @@ CURRENT_CONC_LIMIT = DEFAULT_CONCURRENT_LIMIT
 
 ALTERNATE_BOTS = ["Moviemaza91bot", "Moviemaza92bot", "Mazamovie9bot"]
 
-HANDLER_TIMEOUT = 25
-DB_OP_TIMEOUT = 10
-TG_OP_TIMEOUT = 5 # Strict timeout for Telegram I/O operations
+# ============ OPTIMIZED TIMEOUTS FOR FREE TIER ============
+HANDLER_TIMEOUT = 15  # Reduced from 25
+DB_OP_TIMEOUT = 5     # Reduced from 10
+TG_OP_TIMEOUT = 3     # Reduced from 5
+
+# ============ SEMAPHORE FOR DB OPERATIONS ============
+DB_SEMAPHORE = asyncio.Semaphore(10)  # Max 10 concurrent DB calls
 
 if not BOT_TOKEN or not DATABASE_URL:
     logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
@@ -69,7 +75,15 @@ dp = Dispatcher()
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
 
-# --- Timeout Decorator ---
+# ============ GRACEFUL SHUTDOWN SIGNAL HANDLERS ============
+def handle_shutdown_signal(signum, frame):
+    logger.info(f"Received shutdown signal {signum}, cleaning up...")
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGTERM, handle_shutdown_signal)
+signal.signal(signal.SIGINT, handle_shutdown_signal)
+
+# ============ TIMEOUT DECORATOR ============
 def handler_timeout(timeout: int = HANDLER_TIMEOUT):
     """Decorator to add timeout to handlers to prevent hanging"""
     def decorator(func):
@@ -89,11 +103,12 @@ def handler_timeout(timeout: int = HANDLER_TIMEOUT):
         return wrapper
     return decorator
 
-# --- Safe Wrappers ---
+# ============ SAFE WRAPPERS WITH SEMAPHORE ============
 async def safe_db_call(coro, timeout=DB_OP_TIMEOUT, default=None):
-    """Safely execute database call with timeout and simple failure return."""
+    """Safely execute database call with semaphore + timeout."""
     try:
-        return await asyncio.wait_for(coro, timeout=timeout) 
+        async with DB_SEMAPHORE:  # Limit concurrent DB operations
+            return await asyncio.wait_for(coro, timeout=timeout) 
     except asyncio.TimeoutError:
         logger.error(f"DB operation timed out after {timeout}s")
         return default
@@ -102,7 +117,7 @@ async def safe_db_call(coro, timeout=DB_OP_TIMEOUT, default=None):
         return default
 
 async def safe_tg_call(coro, timeout=TG_OP_TIMEOUT):
-    """Safely execute Telegram API call with timeout. Does NOT suppress TelegramAPIError."""
+    """Safely execute Telegram API call with timeout."""
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
@@ -114,6 +129,7 @@ async def safe_tg_call(coro, timeout=TG_OP_TIMEOUT):
         logger.error(f"Unexpected error in Telegram call: {e}")
         return None
 
+# ============ FILTERS & HELPERS ============
 class AdminFilter(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
         return message.from_user and (message.from_user.id == ADMIN_USER_ID)
@@ -148,13 +164,13 @@ def extract_movie_info(caption: str):
     lines = caption.splitlines()
     if lines:
         title = lines[0].strip()
-        if len(lines) > 1 and re.search(r"S\d{1,2}", lines[1], re.IGNORECASE):
+        if len(lines) > 1 and re.search(r"Sd{1,2}", lines[1], re.IGNORECASE):
             title += " " + lines[1].strip()
         info["title"] = title
-    imdb_match = re.search(r"(tt\d{7,})", caption)
+    imdb_match = re.search(r"(ttd{7,})", caption)
     if imdb_match:
         info["imdb_id"] = imdb_match.group(1)
-    year_match = re.search(r"\b(19|20)\d{2}\b", caption)
+    year_match = re.search(r"\b(19|20)d{2}\b", caption)
     if year_match:
         info["year"] = year_match.group(0)
     return info if "title" in info else None
@@ -168,27 +184,35 @@ aur abhi <b>{active_users}</b> active hain; nayi requests temporarily hold par h
 Be-rukavat access ke liye alternate bots use karein; neeche se choose karke turant dekhna shuru karein."""
     return msg
 
-async def keep_db_alive():
-    """Keeps the database connection pool active by running a lightweight query."""
+# ============ EVENT LOOP MONITOR ============
+async def monitor_event_loop():
+    """Monitors event loop for blocking operations."""
     while True:
-        await asyncio.sleep(60) 
         try:
-            count = await safe_db_call(db.get_user_count(), timeout=5, default=0)
-            logger.info(f"DB keepalive successful (users: {count}).")
+            start = asyncio.get_event_loop().time()
+            await asyncio.sleep(0)
+            lag = asyncio.get_event_loop().time() - start
+            if lag > 0.1:  # 100ms threshold
+                logger.warning(f"⚠️ Event loop lag detected: {lag:.3f}s")
+            await asyncio.sleep(60)
         except Exception as e:
-            logger.error(f"DB keepalive failed: {e}") 
+            logger.error(f"Event loop monitor error: {e}")
+            await asyncio.sleep(60)
 
-
+# ============ LIFESPAN MANAGEMENT ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # CRITICAL FIX 1: Increase the default executor size for CPU-bound tasks (Fuzzy Search)
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=50) 
+    # OPTIMIZED: Reduced executor size for Free Tier (0.1 CPU)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)  # Reduced from 50
     loop = asyncio.get_event_loop()
     loop.set_default_executor(executor)
-    logger.info("Custom ThreadPoolExecutor initialized with max_workers=50.")
+    logger.info("ThreadPoolExecutor initialized with max_workers=10 (Free Tier optimized).")
     
     await db.init_db() 
-    db_task = asyncio.create_task(keep_db_alive()) 
+    
+    # Start event loop monitor
+    monitor_task = asyncio.create_task(monitor_event_loop())
+    logger.info("Event loop monitor started.")
 
     if WEBHOOK_URL:
         try:
@@ -208,19 +232,20 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    db_task.cancel()
+    # Cleanup
+    monitor_task.cancel()
     try:
         await asyncio.sleep(2) 
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         logger.error(f"Webhook delete error: {e}", exc_info=True)
         
-    # CRITICAL FIX 2: Shutdown the executor gracefully
     executor.shutdown(wait=False)
     logger.info("ThreadPoolExecutor shut down.")
 
 app = FastAPI(lifespan=lifespan)
 
+# ============ WEBHOOK ENDPOINT WITH TIMEOUT WRAPPER ============
 async def _process_update(u: Update):
     try:
         await dp.feed_update(bot=bot, update=u)
@@ -236,16 +261,30 @@ async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: 
                 raise HTTPException(status_code=403, detail="Forbidden")
         
         telegram_update = Update(**update)
-        background_tasks.add_task(_process_update, telegram_update) 
+        
+        # OPTIMIZED: Wrap background task with timeout
+        async def _process_with_timeout():
+            try:
+                await asyncio.wait_for(_process_update(telegram_update), timeout=15)
+            except asyncio.TimeoutError:
+                logger.error(f"Update processing timed out: {telegram_update.update_id}")
+        
+        background_tasks.add_task(_process_with_timeout)
         return {"ok": True}
     except Exception as e:
         logger.error(f"Webhook processing error: {e}", exc_info=True)
         return {"ok": False}
 
+# ============ HEALTH CHECK ENDPOINT ============
 @app.get("/")
 async def ping():
     return {"status": "ok", "service": "Movie Bot is Live", "uptime": get_uptime()}
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat(), "uptime": get_uptime()}
+
+# ============ CAPACITY MANAGEMENT ============
 async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
@@ -260,7 +299,6 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     
     active = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), timeout=5, default=0)
     if active > CURRENT_CONC_LIMIT: 
-        # Use simple try/except for non-critical message sending to avoid deep nesting
         try:
             await asyncio.wait_for(message.answer(overflow_message(active), reply_markup=get_full_limit_keyboard()), timeout=3)
         except:
@@ -269,11 +307,11 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
         
     return True
 
+# ============ BOT HANDLERS ============
 @dp.message(CommandStart())
-@handler_timeout(20)
+@handler_timeout(15)
 async def start_command(message: types.Message):
     user_id = message.from_user.id
-    # CRITICAL FIX: Direct await with strict timeout for critical TG call
     try:
         bot_info = await asyncio.wait_for(bot.get_me(), timeout=5)
     except (asyncio.TimeoutError, TelegramAPIError):
@@ -335,7 +373,6 @@ Agar Bot slow ho ya ruk jaaye, toh <b>Alternate Bots</b> use karein jo /start ka
     
     await safe_tg_call(message.answer(help_text))
 
-
 @dp.callback_query(F.data == "check_join")
 @handler_timeout(15)
 async def check_join_callback(callback: types.CallbackQuery):
@@ -357,9 +394,8 @@ Free tier capacity: {CURRENT_CONC_LIMIT}, abhi active: {active_users}."""
     if not result:
         await safe_tg_call(bot.send_message(callback.from_user.id, success_text, reply_markup=None))
 
-
 @dp.message(F.text & ~F.text.startswith("/") & (F.chat.type == "private"))
-@handler_timeout(25)
+@handler_timeout(20)
 async def search_movie_handler(message: types.Message):
     user_id = message.from_user.id
 
@@ -379,8 +415,7 @@ async def search_movie_handler(message: types.Message):
     if not searching_msg:
         return
     
-    # DB search is the longest operation, set a reasonable timeout
-    top = await safe_db_call(db.super_search_movies_advanced(original_query, limit=20), timeout=15, default=[])
+    top = await safe_db_call(db.super_search_movies_advanced(original_query, limit=20), timeout=12, default=[])
     
     if not top:
         await safe_tg_call(searching_msg.edit_text(
@@ -403,7 +438,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
     if not await ensure_capacity_or_inform(callback.message):
         return
         
-    movie = await safe_db_call(db.get_movie_by_imdb(imdb_id), timeout=8)
+    movie = await safe_db_call(db.get_movie_by_imdb(imdb_id), timeout=6)
     if not movie:
         await safe_tg_call(callback.message.edit_text("❌ Yeh movie ab database me uplabdh nahi hai."))
         return
@@ -412,11 +447,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
     
     await safe_tg_call(callback.message.edit_text(f"✅ <b>{movie['title']}</b> — file forward ki ja rahi hai, kripya chat check karein."))
     
-    # --- CRITICAL FILE DELIVERY LOGIC ---
-    
-    # 1. Attempt to Forward (Primary method)
     try:
-        # CRITICAL FIX: Strict timeout on Telegram API call to prevent event loop blocking
         await asyncio.wait_for(
             bot.forward_message(
                 chat_id=callback.from_user.id,
@@ -431,10 +462,8 @@ async def get_movie_callback(callback: types.CallbackQuery):
         forward_failed_msg = str(e).lower()
         logger.error(f"Forward failed for {imdb_id}: {e}")
         
-        # 2. Fallback to send_document using file_id (If message not found or ID is placeholder)
         if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in forward_failed_msg or 'bad request: message to forward not found' in forward_failed_msg:
             try:
-                # Use strict timeout for send_document to prevent event loop blocking
                 await asyncio.wait_for(
                     bot.send_document(
                         chat_id=callback.from_user.id,
@@ -446,13 +475,11 @@ async def get_movie_callback(callback: types.CallbackQuery):
                 success = True
                 
             except (asyncio.TimeoutError, TelegramAPIError) as e2:
-                # This is the final dead file log entry
                 logger.error(f"❌ DEAD FILE: Movie '{movie['title']}' (IMDB: {imdb_id}) failed both forward and send_document. Error: {type(e2).__name__}. Use: /remove_dead_movie {imdb_id}")
                 
             except Exception as e3:
                 logger.error(f"Unexpected error during send_document fallback for {imdb_id}: {e3}")
                 
-    # 3. Final failure message
     if not success:
         admin_hint = f"Admin Hint: /remove_dead_movie {imdb_id}" if callback.from_user.id == ADMIN_USER_ID else ""
         
@@ -463,7 +490,7 @@ async def get_movie_callback(callback: types.CallbackQuery):
         
         await safe_tg_call(callback.message.edit_text(f"❌ <b>{movie['title']}</b> ki file send nahi ho payi. Upar chat check karein."))
 
-
+# ============ ADMIN COMMANDS ============
 @dp.message(Command("stats"), AdminFilter())
 @handler_timeout(15)
 async def stats_command(message: types.Message):
@@ -604,8 +631,10 @@ async def export_csv_command(message: types.Message):
         if not rows:
             await safe_tg_call(message.answer("❌ No user data or DB error."))
             return
-        header = """user_id,username,first_name,last_name,joined_date,last_active,is_active\n"""
-        csv = header + "\n".join([
+        header = """user_id,username,first_name,last_name,joined_date,last_active,is_active
+"""
+        csv = header + "
+".join([
             f"{r['user_id']},{r['username'] or ''},{r['first_name'] or ''},{r['last_name'] or ''},{r['joined_date']},{r['last_active']},{r['is_active']}"
             for r in rows
         ])
@@ -615,8 +644,10 @@ async def export_csv_command(message: types.Message):
         if not rows:
             await safe_tg_call(message.answer("❌ No movie data or DB error."))
             return
-        header = """imdb_id,title,year,channel_id,message_id,added_date\n"""
-        csv = header + "\n".join([
+        header = """imdb_id,title,year,channel_id,message_id,added_date
+"""
+        csv = header + "
+".join([
             f"{r['imdb_id']},{r['title'].replace(',', ' ')},{r['year'] or ''},{r['channel_id']},{r['message_id']},{r['added_date']}"
             for r in rows
         ])
@@ -637,6 +668,7 @@ async def set_limit_command(message: types.Message):
     CURRENT_CONC_LIMIT = val
     await safe_tg_call(message.answer(f"✅ Concurrency limit set to <b>{CURRENT_CONC_LIMIT}</b>"))
 
+# ============ AUTO-INDEX FROM CHANNEL ============
 @dp.channel_post()
 @handler_timeout(20)
 async def auto_index_handler(message: types.Message):
