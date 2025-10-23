@@ -7,7 +7,7 @@ from typing import List, Dict, Tuple, Any
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_, text 
+from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_, text, delete
 from sqlalchemy.exc import OperationalError, DisconnectionError
 
 from thefuzz import fuzz
@@ -15,10 +15,7 @@ from thefuzz import fuzz
 logger = logging.getLogger(__name__)
 Base = declarative_base()
 
-# JSON Import command hatane ke baad iski zaroorat nahi hai, lekin code clean-up ke liye rakha hai.
 AUTO_MESSAGE_ID_PLACEHOLDER = 9090909090 
-
-# --- Helper Functions (Same as before) ---
 
 def clean_text_for_search(text: str) -> str:
     """Removes special characters and common words for cleaner database search."""
@@ -45,9 +42,6 @@ def _consonant_signature(text: str) -> str:
     t = re.sub(r's+', '', t)
     return t
 
-# NOTE: generate_auto_info function has been removed.
-
-# --- Synchronous Helper Function for CPU-Bound Logic (Same) ---
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
     """
     Advanced fuzzy matching logic to handle spelling mistakes, typos, and word order issues aggressively.
@@ -72,8 +66,6 @@ def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str
     
     final = [{'imdb_id': imdb, 'title': t} for (sc, imdb, t) in results if sc >= 50][:20]
     return final
-
-# --- DB Models (Same) ---
 
 class User(Base):
     __tablename__ = 'users'
@@ -117,11 +109,10 @@ class Database:
             database_url, 
             echo=False, 
             connect_args=connect_args,
-            # MAX-RESILIENCE settings for Render/Neon Free Tier
             pool_size=30, 
             max_overflow=60, 
             pool_pre_ping=True, 
-            pool_recycle=60,  # CRITICAL: 60s is very aggressive to prevent connection drops.
+            pool_recycle=60,
             pool_timeout=10, 
         )
         
@@ -137,23 +128,20 @@ class Database:
         if isinstance(e, (OperationalError, DisconnectionError)):
             logger.error(f"Critical DB error detected: {type(e).__name__}. Attempting engine disposal and re-initialization.", exc_info=True)
             try:
-                self.engine.dispose()
+                await self.engine.dispose()
                 self.engine = create_async_engine(
                     self.database_url,
                     echo=False,
-                    # Reuse aggressive settings
                     pool_size=30, max_overflow=60, pool_pre_ping=True, pool_recycle=60, pool_timeout=10,
                 )
                 self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
                 logger.info("DB engine successfully re-initialized.")
-                return True # Retry is possible
+                return True
             except Exception as re_e:
                 logger.critical(f"Failed to re-initialize DB engine: {re_e}", exc_info=True)
-                return False # Cannot recover
+                return False
         return False 
         
-    # --- Robust DB Operations with Retry Logic (Most critical for responsiveness) ---
-    
     async def init_db(self):
         max_retries = 3
         for attempt in range(max_retries):
@@ -200,6 +188,7 @@ class Database:
     async def add_user(self, user_id, username, first_name, last_name):
         max_retries = 2
         for attempt in range(max_retries):
+            session = None
             try:
                 async with self.SessionLocal() as session:
                     result = await session.execute(select(User).filter(User.user_id == user_id))
@@ -215,10 +204,11 @@ class Database:
                     await session.commit()
                     return
             except Exception as e:
+                if session:
+                    await session.rollback()
                 if await self._handle_db_error(e) and attempt < max_retries - 1:
                     await asyncio.sleep(1)
                     continue
-                await session.rollback()
                 logger.error(f"add_user error: {e}", exc_info=True)
                 return
 
@@ -273,6 +263,7 @@ class Database:
     async def cleanup_inactive_users(self, days: int):
         max_retries = 2
         for attempt in range(max_retries):
+            session = None
             try:
                 async with self.SessionLocal() as session:
                     cutoff_date = datetime.utcnow() - timedelta(days=days)
@@ -283,10 +274,11 @@ class Database:
                     await session.commit()
                     return len(users_to_update)
             except Exception as e:
+                if session:
+                    await session.rollback()
                 if await self._handle_db_error(e) and attempt < max_retries - 1:
                     await asyncio.sleep(1)
                     continue
-                await session.rollback()
                 logger.error(f"cleanup_inactive_users error: {e}", exc_info=True)
                 return 0
         return 0
@@ -294,6 +286,7 @@ class Database:
     async def add_movie(self, imdb_id, title, year, file_id, message_id, channel_id):
         max_retries = 2
         for attempt in range(max_retries):
+            session = None
             try:
                 async with self.SessionLocal() as session:
                     clean_title = clean_text_for_search(title)
@@ -305,15 +298,34 @@ class Database:
                     await session.commit()
                     return True
             except Exception as e:
+                if session:
+                    await session.rollback()
                 if await self._handle_db_error(e) and attempt < max_retries - 1:
                     await asyncio.sleep(1)
                     continue
                 logger.error(f"Movie add error: {e}", exc_info=True)
-                await session.rollback()
                 return False
         return False
-        
-    # NOTE: bulk_add_new_movies has been removed.
+
+    async def remove_movie_by_imdb(self, imdb_id: str) -> bool:
+        """Removes a movie from the database by its IMDB ID."""
+        max_retries = 2
+        for attempt in range(max_retries):
+            session = None
+            try:
+                async with self.SessionLocal() as session:
+                    result = await session.execute(delete(Movie).where(Movie.imdb_id == imdb_id))
+                    await session.commit()
+                    return result.rowcount > 0
+            except Exception as e:
+                if session:
+                    await session.rollback()
+                if await self._handle_db_error(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"remove_movie_by_imdb error: {e}", exc_info=True)
+                return False
+        return False
 
     async def get_movie_count(self):
         max_retries = 2
@@ -417,6 +429,7 @@ class Database:
     async def rebuild_clean_titles(self) -> Tuple[int, int]:
         max_retries = 2
         for attempt in range(max_retries):
+            session = None
             async with self.SessionLocal() as session:
                 updated = 0
                 total = 0
@@ -439,11 +452,12 @@ class Database:
                         offset += batch
                     return updated, total
                 except Exception as e:
+                    if session:
+                        await session.rollback()
                     if await self._handle_db_error(e) and attempt < max_retries - 1:
                         await asyncio.sleep(1)
                         continue
                     logger.error(f"Rebuild index failed: {e}", exc_info=True)
-                    await session.rollback()
                     return 0, total
         return 0, 0
 
