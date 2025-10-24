@@ -1,21 +1,22 @@
 # requirements.txt
-
-# Core FastAPI and Aiogram
+# --- Core Web Frameworks ---
 fastapi
-uvicorn
-uvicorn[standard]
-aiogram
-python-dotenv
+uvicorn[standard] # Includes standard dependencies for high performance
+python-dotenv     # For reading .env file variables
 
-# Database and Asynchronous Handling
-sqlalchemy[asyncio]
-asyncpg # For PostgreSQL support
-psycopg2-binary # Optional: If you need sync PostgreSQL tools (though asyncpg is the primary)
+# --- Telegram Bot Library ---
+aiogram           # Main Telegram bot framework
 
-# Algolia Integration
-algoliasearch
+# --- Database Integration (Async SQLAlchemy with PostgreSQL) ---
+sqlalchemy[asyncio] # SQLAlchemy Async Support
+asyncpg           # Recommended fast PostgreSQL driver for Asyncio
+# psycopg2-binary   # (Optional, removed to keep dependencies lean, use asyncpg)
 
-# Utility for graceful shutdown and multiprocessing
-# concurrent.futures is standard, but keeping dependencies clear.
+# --- Algolia Search Integration ---
+algoliasearch     # Client for the Algolia service
 
-# Note: thefuzz is no longer needed since Algolia handles fuzzy search, saving significant CPU.
+# --- Utilities ---
+# contextlib (standard library)
+# typing (standard library)
+# functools (standard library)
+# concurrent.futures (standard library)
