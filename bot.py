@@ -35,7 +35,13 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "123456789"))
 LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", "-1003138949015"))
 JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
-DATABASE_URL = os.getenv("DATABASE_URL")
+
+# --- Database Config (main.py se liya gaya) ---
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "5432") # Default postgres port 5432 hai
+DB_NAME = os.getenv("DB_NAME")
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
@@ -55,9 +61,13 @@ TG_OP_TIMEOUT = 3     # Reduced from 5
 # ============ SEMAPHORE FOR DB OPERATIONS ============
 DB_SEMAPHORE = asyncio.Semaphore(10)  # Max 10 concurrent DB calls
 
-if not BOT_TOKEN or not DATABASE_URL:
-    logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
+# --- Check zaroori variables ---
+if not BOT_TOKEN or not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
+    logger.critical("Missing BOT_TOKEN or DB_USER/DB_PASSWORD/DB_HOST/DB_NAME! Exiting.")
     raise SystemExit(1)
+
+# --- Database URL ko construct karein ---
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 def build_webhook_url() -> str:
     base = None
@@ -74,6 +84,7 @@ WEBHOOK_URL = build_webhook_url()
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+# Database class abhi bhi DATABASE_URL string hi lega, jo humne upar banaya hai
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
 
