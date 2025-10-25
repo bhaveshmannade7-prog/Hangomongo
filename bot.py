@@ -40,7 +40,7 @@ USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT", "5432") # Default postgres port 5432 hai
+DB_PORT = os.getenv("DB_PORT") # Default 5432 yahan se hata diya
 DB_NAME = os.getenv("DB_NAME")
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
@@ -62,8 +62,14 @@ TG_OP_TIMEOUT = 3     # Reduced from 5
 DB_SEMAPHORE = asyncio.Semaphore(10)  # Max 10 concurrent DB calls
 
 # --- Check zaroori variables ---
-if not BOT_TOKEN or not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME]):
-    logger.critical("Missing BOT_TOKEN or DB_USER/DB_PASSWORD/DB_HOST/DB_NAME! Exiting.")
+# FIX: Ab yeh 5 DB variables check karega
+if not BOT_TOKEN or not all([DB_USER, DB_PASSWORD, DB_HOST, DB_NAME, DB_PORT]):
+    logger.critical("Missing BOT_TOKEN or DB_USER/DB_PASSWORD/DB_HOST/DB_NAME/DB_PORT! Exiting.")
+    logger.critical(f"DB_USER: {'Set' if DB_USER else 'MISSING'}")
+    logger.critical(f"DB_PASSWORD: {'Set' if DB_PASSWORD else 'MISSING'}")
+    logger.critical(f"DB_HOST: {'Set' if DB_HOST else 'MISSING'}")
+    logger.critical(f"DB_NAME: {'Set' if DB_NAME else 'MISSING'}")
+    logger.critical(f"DB_PORT: {'Set' if DB_PORT else 'MISSING'}")
     raise SystemExit(1)
 
 # --- Database URL ko construct karein ---
