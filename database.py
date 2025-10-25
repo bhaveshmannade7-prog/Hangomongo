@@ -184,8 +184,9 @@ class Database:
                     
                     if self.engine.dialect.name == 'postgresql':
                         try:
+                            # FIX: Added 'r' to make it a raw string
                             check_query = text(
-                                """
+                                r"""
                                 SELECT 1
                                 FROM information_schema.columns 
                                 WHERE table_name='movies' AND column_name='clean_title';
@@ -199,8 +200,8 @@ class Database:
                                 await conn.execute(text("ALTER TABLE movies ADD COLUMN clean_title VARCHAR"))
                                 
                                 # [FIXED] SQL Query ko naye clean_text_for_search logic se match kiya gaya hai
-                                # \y = word boundary in postgresql
-                                update_query = text("""
+                                # FIX: Added 'r' to make it a raw string
+                                update_query = text(r"""
                                     UPDATE movies 
                                     SET clean_title = trim(
                                         regexp_replace( -- Collapse spaces
@@ -441,7 +442,8 @@ class Database:
                     total = result.scalar_one()
                     
                     # [FIXED] SQL Query ko naye clean_text_for_search logic se match kiya gaya hai
-                    update_query = text("""
+                    # FIX: Added 'r' to make it a raw string
+                    update_query = text(r"""
                         UPDATE movies 
                         SET clean_title = trim(
                             regexp_replace( -- Collapse spaces
