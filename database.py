@@ -17,49 +17,28 @@ Base = declarative_base()
 AUTO_MESSAGE_ID_PLACEHOLDER = 9090909090 
 
 def clean_text_for_search(text: str) -> str:
-    """Removes special characters and common words for cleaner database search."""
     text = text.lower()
-    # [FIXED] Regex ko punctuation hatane ke liye update kiya gaya hai
-    # Purana code: [^a-z0-9s]+ (yeh 's' ko chhod kar sab non-alphanumeric remove karta tha)
-    text = re.sub(r'[^a-z0-9]+', ' ', text)  # Punctuation ko space se replace karein
-    
-    # [FIXED] 's*' ko '\s*' (whitespace) se replace kiya gaya hai
-    # [FIXED] 's|season' ke baad space compulsory nahi hai (\s* = zero or more space)
-    text = re.sub(r'\b(s|season)\s*\d{1,2}\b', '', text) # 'season 1', 's01' etc. hatayein.
-    
-    # [FIXED] 's+' ko '\s+' (whitespace) se replace kiya gaya hai
-    text = re.sub(r'\s+', ' ', text) # Ek se zyada space ko ek space banayein
+    text = re.sub(r'[^a-z0-9]+', ' ', text)
+    text = re.sub(r'\b(s|season)\s*\d{1,2}\b', '', text)
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 def _normalize_for_fuzzy(text: str) -> str:
-    """Normalizes text for better fuzzy matching (phonetic similarities)."""
     t = text.lower()
-    # [FIXED] Regex ko punctuation hatane ke liye update kiya gaya hai
-    # Purana code: [^a-z0-9s]
-    t = re.sub(r'[^a-z0-9]', ' ', t) # Sirf alphanumeric rakhein
-    
-    # [FIXED] 's+' ko '\s+' (whitespace) se replace kiya gaya hai
-    t = re.sub(r'\s+', ' ', t).strip() # Ek se zyada space ko ek space banayein
-    
+    t = re.sub(r'[^a-z0-9]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
     t = t.replace('ph', 'f').replace('aa', 'a').replace('kh', 'k').replace('gh', 'g')
     t = t.replace('ck', 'k').replace('cq', 'k').replace('qu', 'k').replace('q', 'k')
     t = t.replace('x', 'ks').replace('c', 'k')
     return t
 
 def _consonant_signature(text: str) -> str:
-    """Extracts only consonants to detect missing vowels (ktra -> kntr)."""
     t = _normalize_for_fuzzy(text)
     t = re.sub(r'[aeiou]', '', t)
-    
-    # [FIXED] 's+' ko '\s+' (whitespace) se replace kiya gaya hai
-    t = re.sub(r'\s+', '', t) # Saare space hatayein
+    t = re.sub(r'\s+', '', t)
     return t
 
 def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str) -> List[Dict]:
-    """
-    OPTIMIZED: Advanced fuzzy matching with early exit and pre-filtering for Free Tier CPU efficiency.
-    """
-    # OPTIMIZATION: Limit candidate pool to prevent CPU exhaustion
     if len(candidates) > 100:
         candidates = candidates[:100]
     
@@ -69,13 +48,11 @@ def _process_fuzzy_candidates(candidates: List[Tuple[str, str, str]], query: str
     
     results = []
     for imdb_id, title, clean_title in candidates:
-        # OPTIMIZATION: Fast pre-filter before expensive fuzzy operations
         if not any(t in clean_title for t in tokens if t):
-            continue  # Skip if no tokens match
+            continue
         
         s_w_ratio = fuzz.WRatio(clean_title, q_clean)
         
-        # OPTIMIZATION: Early exit for low scores (saves ~40% CPU)
         if s_w_ratio < 40:
             continue
         
@@ -123,30 +100,26 @@ class Database:
     def __init__(self, database_url: str):
         connect_args = {}
         
-        if database_url.startswith('postgres'):
-            if database_url.startswith('postgres://'):
-                database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
-            elif database_url.startswith('postgresql://'):
-                database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
+        # FIX: Supabase/Render ke liye SSL settings ko force karein
+        if 'supabase.co' in database_url:
+             connect_args['ssl'] = 'require'
                 
-            # Yeh logic Neon aur Supabase dono ke liye kaam karega
-            if 'sslmode=require' in database_url or 'sslmode=required' in database_url:
-                connect_args['ssl'] = 'require'
-                database_url = database_url.split('?')[0]
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
+        elif database_url.startswith('postgresql://'):
+             database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
+
+        self.database_url = database_url
         
-        # Agar Supabase URL mein sslmode nahi bhi hai, asyncpg default (prefer) use karega, jo Supabase ke liye sahi hai.
-        self.database_url = database_url 
-        
-        # ============ OPTIMIZED FOR FREE TIER ============
         self.engine = create_async_engine(
             database_url, 
             echo=False, 
-            connect_args=connect_args,
-            pool_size=5,          # Reduced from 30 (Free Tier optimization)
-            max_overflow=10,      # Reduced from 60 (Total max = 15 connections)
-            pool_pre_ping=True,   # Validates connections before use
-            pool_recycle=300,     # Increased from 60 (connections live 5 minutes)
-            pool_timeout=8,       # Reduced from 10 (fail faster)
+            connect_args=connect_args, # Yahan connect_args add kiye gaye
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=300,
+            pool_timeout=8,
         )
         
         self.SessionLocal = sessionmaker(
@@ -154,17 +127,22 @@ class Database:
             expire_on_commit=False, 
             class_=AsyncSession
         )
-        logger.info("Database engine initialized with FREE-TIER-OPTIMIZED pooling: pool_size=5, max_overflow=10.")
+        logger.info(f"Database engine initialized (SSL: {connect_args.get('ssl', 'default')}) with pooling: pool_size=5, max_overflow=10.")
         
     async def _handle_db_error(self, e: Exception) -> bool:
-        """Attempts to handle operational errors by disposing and recreating the engine."""
         if isinstance(e, (OperationalError, DisconnectionError)):
             logger.error(f"Critical DB error detected: {type(e).__name__}. Attempting engine re-initialization.", exc_info=True)
             try:
                 await self.engine.dispose()
+                # Connect args ko dobara pass karein
+                connect_args = {}
+                if 'supabase.co' in self.database_url:
+                    connect_args['ssl'] = 'require'
+
                 self.engine = create_async_engine(
                     self.database_url,
                     echo=False,
+                    connect_args=connect_args,
                     pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=300, pool_timeout=8,
                 )
                 self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
@@ -184,7 +162,6 @@ class Database:
                     
                     if self.engine.dialect.name == 'postgresql':
                         try:
-                            # FIX: Added 'r' to make it a raw string
                             check_query = text(
                                 r"""
                                 SELECT 1
@@ -199,14 +176,12 @@ class Database:
                                 logger.warning("Applying manual migration: Adding 'clean_title' column.")
                                 await conn.execute(text("ALTER TABLE movies ADD COLUMN clean_title VARCHAR"))
                                 
-                                # [FIXED] SQL Query ko naye clean_text_for_search logic se match kiya gaya hai
-                                # FIX: Added 'r' to make it a raw string
                                 update_query = text(r"""
                                     UPDATE movies 
                                     SET clean_title = trim(
-                                        regexp_replace( -- Collapse spaces
-                                            regexp_replace( -- Remove seasons
-                                                regexp_replace( -- Punctuation to space
+                                        regexp_replace(
+                                            regexp_replace(
+                                                regexp_replace(
                                                     lower(title), 
                                                 '[^a-z0-9]+', ' ', 'g'),
                                             '\y(s|season)\s*\d{1,2}\y', '', 'g'),
@@ -327,7 +302,6 @@ class Database:
                 return None
 
     async def super_search_movies_advanced(self, query: str, limit: int = 20) -> List[Dict]:
-        """OPTIMIZED: Multi-stage search with early exit and candidate limiting."""
         max_retries = 2
         for attempt in range(max_retries):
             try:
@@ -335,14 +309,12 @@ class Database:
                     q_clean = clean_text_for_search(query)
                     tokens = q_clean.split()
                     
-                    # Stage 1: Exact match
                     exact_stmt = select(Movie).where(Movie.clean_title == q_clean).limit(5)
                     exact_result = await session.execute(exact_stmt)
                     exact_matches = exact_result.scalars().all()
                     if exact_matches:
                         return [{'imdb_id': m.imdb_id, 'title': m.title} for m in exact_matches[:limit]]
                     
-                    # Stage 2: SQL partial match (OPTIMIZED: Limit to 150 candidates)
                     if tokens:
                         conditions = [Movie.clean_title.contains(token) for token in tokens if token]
                         partial_stmt = select(Movie.imdb_id, Movie.title, Movie.clean_title).where(or_(*conditions)).limit(150)
@@ -350,9 +322,7 @@ class Database:
                         candidates = partial_result.all()
                         
                         if candidates:
-                            # Stage 3: Fuzzy matching (runs in ThreadPoolExecutor)
                             loop = asyncio.get_event_loop()
-                            # _process_fuzzy_candidates ab fixed logic istemaal karega
                             fuzzy_results = await loop.run_in_executor(None, _process_fuzzy_candidates, candidates, query)
                             if fuzzy_results:
                                 return fuzzy_results[:limit]
@@ -371,7 +341,6 @@ class Database:
             session = None
             try:
                 async with self.SessionLocal() as session:
-                    # Yahan fixed 'clean_text_for_search' istemaal hoga
                     clean = clean_text_for_search(title)
                     movie = Movie(
                         imdb_id=imdb_id, title=title, clean_title=clean, year=year,
@@ -441,16 +410,14 @@ class Database:
                     result = await session.execute(select(func.count(Movie.id)))
                     total = result.scalar_one()
                     
-                    # [FIXED] SQL Query ko naye clean_text_for_search logic se match kiya gaya hai
-                    # FIX: Added 'r' to make it a raw string
                     update_query = text(r"""
                         UPDATE movies 
                         SET clean_title = trim(
-                            regexp_replace( -- Collapse spaces
-                                regexp_replace( -- Remove seasons
-                                    regexp_replace( -- Punctuation to space
+                            regexp_replace(
+                                regexp_replace(
+                                    regexp_replace(
                                         lower(title), 
-                                    '[^a-z0-9]+', ' ', 'g'),
+                                    '[^a-z0-Nahi]+', ' ', 'g'),
                                 '\y(s|season)\s*\d{1,2}\y', '', 'g'),
                             '\s+', ' ', 'g')
                         )
