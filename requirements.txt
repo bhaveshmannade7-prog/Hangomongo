@@ -1,0 +1,7 @@
+aiogram==3.10.0
+fastapi==0.111.1
+uvicorn==0.30.3
+python-dotenv==1.0.1
+SQLAlchemy[asyncpg]==2.0.31
+thefuzz==0.22.1
+python-multipart==0.0.9
