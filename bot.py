@@ -37,7 +37,6 @@ LIBRARY_CHANNEL_ID = int(os.getenv("LIBRARY_CHANNEL_ID", "-1003138949015"))
 JOIN_CHANNEL_USERNAME = os.getenv("JOIN_CHANNEL_USERNAME", "MOVIEMAZASU")
 USER_GROUP_USERNAME = os.getenv("USER_GROUP_USERNAME", "THEGREATMOVIESL9")
 
-# --- FIX: Ab hum 5 alag variable ke bajaye seedha DATABASE_URL ka istemaal karenge ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
@@ -58,7 +57,6 @@ TG_OP_TIMEOUT = 3
 # ============ SEMAPHORE FOR DB OPERATIONS ============
 DB_SEMAPHORE = asyncio.Semaphore(10)
 
-# --- FIX: Zaroori variables ko check karein ---
 if not BOT_TOKEN or not DATABASE_URL:
     logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
     if not BOT_TOKEN:
@@ -82,7 +80,6 @@ WEBHOOK_URL = build_webhook_url()
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-# Database class ab DATABASE_URL string se seedha connect hoga
 db = Database(DATABASE_URL)
 start_time = datetime.utcnow()
 
@@ -159,13 +156,13 @@ async def check_user_membership(user_id: int) -> bool:
 
 def get_join_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Channel Join Karein", url=f"[https://t.me/](https://t.me/){JOIN_CHANNEL_USERNAME}")],
-        [InlineKeyboardButton(text="👥 Group Join Karein", url=f"[https://t.me/](https://t.me/){USER_GROUP_USERNAME}")],
+        [InlineKeyboardButton(text="📢 Channel Join Karein", url=f"https://t.me/{JOIN_CHANNEL_USERNAME}")],
+        [InlineKeyboardButton(text="👥 Group Join Karein", url=f"https://t.me/{USER_GROUP_USERNAME}")],
         [InlineKeyboardButton(text="✅ I Have Joined Both", callback_data="check_join")]
     ])
 
 def get_full_limit_keyboard():
-    buttons = [[InlineKeyboardButton(text=f"🚀 @{b} (Alternate Bot)", url=f"[https://t.me/](https://t.me/){b}")] for b in ALTERNATE_BOTS]
+    buttons = [[InlineKeyboardButton(text=f"🚀 @{b} (Alternate Bot)", url=f"https://t.me/{b}")] for b in ALTERNATE_BOTS]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def extract_movie_info(caption: str):
@@ -198,7 +195,7 @@ def parse_filename(filename: str) -> Dict[str, str]:
     else:
         matches = re.findall(r"\b((19|20)\d{2})\b", filename)
         if matches:
-            year = matches[-1]
+            year = matches[-1][0] # Fix: Grouping se [0] lein
     
     title = os.path.splitext(filename)[0]
     
@@ -237,7 +234,6 @@ async def lifespan(app: FastAPI):
     loop.set_default_executor(executor)
     logger.info("ThreadPoolExecutor initialized with max_workers=10 (Free Tier optimized).")
     
-    # db.init_db() ab DATABASE_URL ka istemaal karke run hoga
     await db.init_db() 
     
     monitor_task = asyncio.create_task(monitor_event_loop())
@@ -306,10 +302,12 @@ async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: 
 # ============ HEALTH CHECK ENDPOINT ============
 @app.get("/")
 async def ping():
+    logger.info("Ping/Root endpoint hit (keep-alive).")
     return {"status": "ok", "service": "Movie Bot is Live", "uptime": get_uptime()}
 
 @app.get("/health")
 async def health_check():
+    logger.info("Health check endpoint hit (keep-alive).")
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat(), "uptime": get_uptime()}
 
 # ============ CAPACITY MANAGEMENT ============
@@ -317,6 +315,7 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
     
+    # User ko DB mein add/update karein
     await safe_db_call(
         db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name),
         timeout=5
@@ -325,6 +324,7 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     if user_id == ADMIN_USER_ID:
         return True
     
+    # Active users ki ginti check karein
     active = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), timeout=5, default=0)
     if active > CURRENT_CONC_LIMIT: 
         try:
@@ -604,13 +604,17 @@ async def add_movie_command(message: types.Message):
         return
         
     file_id = message.reply_to_message.video.file_id if message.reply_to_message.video else message.reply_to_message.document.file_id
+    
+    # --- FIX: `add_movie` ke naye return values ko handle karein ---
     success = await safe_db_call(db.add_movie(
         imdb_id=imdb_id, title=title, year=year,
         file_id=file_id, message_id=message.reply_to_message.message_id, channel_id=message.reply_to_message.chat.id
     ), default=False)
     
-    if success:
+    if success == True:
         await safe_tg_call(message.answer(f"✅ Movie '<b>{title}</b>' add ho gayi hai."))
+    elif success == "duplicate":
+        await safe_tg_call(message.answer(f"⚠️ Movie add nahi hui: Yeh **File ID** pehle se database mein hai."))
     else:
         await safe_tg_call(message.answer("❌ Movie add karne me error aaya (DB connection issue)."))
 
@@ -655,38 +659,43 @@ async def import_json_command(message: types.Message):
 
     for i, item in enumerate(movies):
         try:
+            # --- FIX: Aapke JSON structure ke hisaab se keys ---
             file_id = item.get("file_id")
-            filename = item.get("title")
+            filename = item.get("title") # JSON se 'title' field lein
             
             if not file_id or not filename:
+                logger.warning(f"JSON item {i} skipped: missing file_id or title")
                 skipped += 1
                 continue
             
+            # --- FIX: IMDB ID ko file_id ke hash se banayein taaki woh unique ho ---
+            # Yeh zaroori hai kyonki JSON mein IMDB ID nahi hai
             imdb_id = f"json_{hashlib.md5(file_id.encode()).hexdigest()}"
             
-            existing = await safe_db_call(db.get_movie_by_imdb(imdb_id), timeout=3)
-            if existing:
-                skipped += 1
-                continue
-                
+            # Note: Hum `get_movie_by_imdb` check hata rahe hain kyonki
+            # `add_movie` ab `file_id` ke basis par duplicate check karega, jo behtar hai.
+            
             parsed_info = parse_filename(filename)
             
-            success = await safe_db_call(db.add_movie(
+            # --- FIX: `add_movie` ke naye return values (True, False, "duplicate") ko handle karein ---
+            result = await safe_db_call(db.add_movie(
                 imdb_id=imdb_id,
                 title=parsed_info["title"],
                 year=parsed_info["year"],
                 file_id=file_id,
-                message_id=AUTO_MESSAGE_ID_PLACEHOLDER,
-                channel_id=0
+                message_id=AUTO_MESSAGE_ID_PLACEHOLDER, # JSON import ke liye placeholder
+                channel_id=0 # JSON import ke liye 0
             ), default=False)
             
-            if success:
+            if result == True:
                 added += 1
-            else:
+            elif result == "duplicate":
+                skipped += 1
+            else: # result == False
                 failed += 1
                 
         except Exception as e:
-            logger.error(f"JSON import error for item {i}: {e}")
+            logger.error(f"JSON import error for item {i} ('{filename}'): {e}")
             failed += 1
         
         if (i + 1) % 50 == 0 or (i + 1) == total:
@@ -701,7 +710,7 @@ async def import_json_command(message: types.Message):
                 if "message is not modified" not in str(e):
                     logger.warning(f"Progress update failed: {e}")
             
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5) # DB par load kam karne ke liye
 
     await safe_tg_call(progress_msg.edit_text(
         f"✅ <b>JSON Import Complete!</b>\n\n"
@@ -804,13 +813,13 @@ async def auto_index_handler(message: types.Message):
         return
     
     file_id = message.video.file_id if message.video else message.document.file_id
+    # --- FIX: Agar caption mein IMDB ID nahi hai, toh message_id se ek unique ID banayein ---
     imdb_id = movie_info.get("imdb_id", f"auto_{message.message_id}") 
     
-    existing = await safe_db_call(db.get_movie_by_imdb(imdb_id))
-    if existing:
-        logger.info(f"Movie already indexed: {movie_info.get('title')}")
-        return
+    # Note: Hum yahaan `get_movie_by_imdb` check hata rahe hain.
+    # `add_movie` ab `file_id` ke basis par duplicate check karega, jo behtar hai.
         
+    # --- FIX: `add_movie` ke naye return values ko handle karein ---
     success = await safe_db_call(db.add_movie(
         imdb_id=imdb_id,
         title=movie_info.get("title"),
@@ -820,7 +829,9 @@ async def auto_index_handler(message: types.Message):
         channel_id=message.chat.id,
     ), default=False)
     
-    if success:
+    if success == True:
         logger.info(f"Auto-indexed: {movie_info.get('title')}")
+    elif success == "duplicate":
+        logger.info(f"Auto-index skipped: File ID already exists for {movie_info.get('title')}")
     else:
         logger.error(f"Auto-index failed: {movie_info.get('title')} (DB connection issue).")
