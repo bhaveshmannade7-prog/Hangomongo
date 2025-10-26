@@ -7,6 +7,7 @@ from typing import List, Dict, Tuple, Any
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime, Boolean, Integer, func, select, or_, text, delete, UniqueConstraint
+# IntegrityError import karein (duplicate errors ko pakadne ke liye)
 from sqlalchemy.exc import OperationalError, DisconnectionError, IntegrityError
 
 from thefuzz import fuzz
@@ -95,6 +96,7 @@ class Movie(Base):
     message_id = Column(BigInteger, nullable=False)
     added_date = Column(DateTime, default=datetime.utcnow)
     
+    # file_id par UNIQUE constraint taaki duplicates na ban sakein
     __table_args__ = (UniqueConstraint('file_id', name='uq_file_id'),)
 
 
@@ -102,17 +104,13 @@ class Database:
     def __init__(self, database_url: str):
         connect_args = {}
         
+        # Supabase/Render/Cloud DBs ke liye SSL settings ko force karein
         if '.com' in database_url or '.co' in database_url:
              connect_args['ssl'] = 'require'
              logger.info("External database URL (e.g., .com/.co) detected, setting ssl='require'.")
         else:
              logger.info("Internal database URL detected, using default SSL (none).")
         
-        # --- FIX: `statement_cache_size=0` ko `connect_args` mein daalein ---
-        # Yeh Supabase Pooler ke liye zaroori hai
-        connect_args['statement_cache_size'] = 0
-        logger.info("Setting statement_cache_size=0 for asyncpg pooler.")
-
         if database_url.startswith('postgresql://'):
              database_url_mod = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
         elif database_url.startswith('postgres://'):
@@ -125,13 +123,12 @@ class Database:
         self.engine = create_async_engine(
             self.database_url, 
             echo=False, 
-            connect_args=connect_args, # Ab `connect_args` mein {'ssl': 'require', 'statement_cache_size': 0} hoga
+            connect_args=connect_args, # Yahaan se `statement_cache_size` hata diya gaya hai
             pool_size=5,
             max_overflow=10,
             pool_pre_ping=True,
             pool_recycle=300,
             pool_timeout=8,
-            # `statement_cache_size=0` yahaan se hata diya gaya hai
         )
         
         self.SessionLocal = sessionmaker(
@@ -139,25 +136,21 @@ class Database:
             expire_on_commit=False, 
             class_=AsyncSession
         )
-        logger.info(f"Database engine initialized (SSL: {connect_args.get('ssl', 'default')}) with pooling: pool_size=5, max_overflow=10, statement_cache_size=0.")
+        logger.info(f"Database engine initialized (SSL: {connect_args.get('ssl', 'default')}) with pooling: pool_size=5, max_overflow=10.")
         
     async def _handle_db_error(self, e: Exception) -> bool:
         if isinstance(e, (OperationalError, DisconnectionError)):
             logger.error(f"Critical DB error detected: {type(e).__name__}. Attempting engine re-initialization.", exc_info=True)
             try:
                 await self.engine.dispose()
-                
                 connect_args = {}
                 if '.com' in self.database_url or '.co' in self.database_url:
                     connect_args['ssl'] = 'require'
-                
-                # --- FIX: Yahaan bhi add karein taaki reconnect hone par bhi setting laagu ho ---
-                connect_args['statement_cache_size'] = 0
 
                 self.engine = create_async_engine(
                     self.database_url,
                     echo=False,
-                    connect_args=connect_args,
+                    connect_args=connect_args, # Yahaan se `statement_cache_size` hata diya gaya hai
                     pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=300, pool_timeout=8,
                 )
                 self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
@@ -175,7 +168,6 @@ class Database:
                 async with self.engine.begin() as conn:
                     await conn.run_sync(Base.metadata.create_all)
                     
-                    # --- Migration logic (isko chheda nahi hai) ---
                     if self.engine.dialect.name == 'postgresql':
                         try:
                             check_query = text(
@@ -212,7 +204,6 @@ class Database:
                                 logger.info("Manual migration completed.")
                         except Exception as e:
                             logger.error(f"Migration check failed: {e}")
-                    # --- End of migration logic ---
 
                 logger.info("Database tables initialized successfully.")
                 return
@@ -222,10 +213,9 @@ class Database:
                     continue
                 logger.critical(f"Failed to initialize DB after {attempt + 1} attempts.", exc_info=True)
                 raise 
-
-    # --- Baaki sabhi functions (add_user, get_movie, etc.) waise hi hain ---
-    # (Code neeche waisa hi hai jaisa pichli baar optimize kiya tha, usmein koi badlaav nahi)
-
+    
+    # --- Baaki sabhi functions (add_user, etc.) waise hi hain ---
+    
     async def add_user(self, user_id, username, first_name, last_name):
         max_retries = 2
         for attempt in range(max_retries):
