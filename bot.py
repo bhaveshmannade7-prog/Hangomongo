@@ -59,10 +59,6 @@ DB_SEMAPHORE = asyncio.Semaphore(10)
 
 if not BOT_TOKEN or not DATABASE_URL:
     logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
-    if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN is MISSING.")
-    if not DATABASE_URL:
-        logger.critical("DATABASE_URL is MISSING. (Kripya Render mein 5 puraane DB variables delete karke ise add karein).")
     raise SystemExit(1)
 
 def build_webhook_url() -> str:
@@ -152,6 +148,7 @@ def get_uptime() -> str:
     return f"{minutes}m {seconds}s"
 
 async def check_user_membership(user_id: int) -> bool:
+    # TODO: Implement actual check
     return True 
 
 def get_join_keyboard():
@@ -189,13 +186,16 @@ def parse_filename(filename: str) -> Dict[str, str]:
     """JSON se title aur year nikalne ke liye helper function."""
     year = None
     
+    # Pehle (YYYY) format dhoondein
     match = re.search(r"\(((19|20)\d{2})\)", filename)
     if match:
         year = match.group(1)
     else:
+        # Agar woh nahi mila, toh koi bhi 4-digit number (19XX ya 20XX) dhoondein
         matches = re.findall(r"\b((19|20)\d{2})\b", filename)
         if matches:
-            year = matches[-1][0] # Fix: Grouping se [0] lein
+            # Aakhri match ko year maanein
+            year = matches[-1][0] 
     
     title = os.path.splitext(filename)[0]
     
@@ -217,9 +217,9 @@ async def monitor_event_loop():
     while True:
         try:
             start = asyncio.get_event_loop().time()
-            await asyncio.sleep(0)
+            await asyncio.sleep(0) # Yield control
             lag = asyncio.get_event_loop().time() - start
-            if lag > 0.1:
+            if lag > 0.1: # 100ms se zyaada lag
                 logger.warning(f"⚠️ Event loop lag detected: {lag:.3f}s")
             await asyncio.sleep(60)
         except Exception as e:
@@ -287,11 +287,28 @@ async def bot_webhook(update: dict, background_tasks: BackgroundTasks, request: 
         
         telegram_update = Update(**update)
         
+        # --- FIX: Yahaan hum lamba chalne waale commands ke liye timeout badhaayenge ---
+        timeout_duration = 15  # Default 15 second timeout
+        
+        msg_text = None
+        if telegram_update.message and telegram_update.message.text:
+            msg_text = telegram_update.message.text
+        
+        if msg_text:
+            if msg_text.startswith("/import_json") or msg_text.startswith("/broadcast"):
+                timeout_duration = 1810  # 30 minute + 10s buffer
+                logger.info(f"Long-running command '{msg_text.split()[0]}' detected, setting timeout to {timeout_duration}s")
+            elif msg_text.startswith("/rebuild_index"):
+                timeout_duration = 310  # 5 minute + 10s buffer
+                logger.info(f"Medium-running command '/rebuild_index' detected, setting timeout to {timeout_duration}s")
+        # --- End of Fix ---
+
         async def _process_with_timeout():
             try:
-                await asyncio.wait_for(_process_update(telegram_update), timeout=15)
+                # Ab dynamic timeout ka istemaal hoga
+                await asyncio.wait_for(_process_update(telegram_update), timeout=timeout_duration)
             except asyncio.TimeoutError:
-                logger.error(f"Update processing timed out: {telegram_update.update_id}")
+                logger.error(f"Update processing timed out after {timeout_duration}s: {telegram_update.update_id}")
         
         background_tasks.add_task(_process_with_timeout)
         return {"ok": True}
@@ -315,7 +332,6 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     """Checks capacity, updates user's last_active time, and enforces limit."""
     user_id = message.from_user.id
     
-    # User ko DB mein add/update karein
     await safe_db_call(
         db.add_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name),
         timeout=5
@@ -324,7 +340,6 @@ async def ensure_capacity_or_inform(message: types.Message) -> bool:
     if user_id == ADMIN_USER_ID:
         return True
     
-    # Active users ki ginti check karein
     active = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), timeout=5, default=0)
     if active > CURRENT_CONC_LIMIT: 
         try:
@@ -491,7 +506,9 @@ async def get_movie_callback(callback: types.CallbackQuery):
         forward_failed_msg = str(e).lower()
         logger.error(f"Forward failed for {imdb_id}: {e}")
         
+        # Agar forward fail ho (ya message_id placeholder ho), toh file_id se bhejne ki koshish karein
         if movie["message_id"] == AUTO_MESSAGE_ID_PLACEHOLDER or 'message to forward not found' in forward_failed_msg or 'bad request: message to forward not found' in forward_failed_msg:
+            logger.info(f"Forward failed, falling back to send_document for {imdb_id}")
             try:
                 await asyncio.wait_for(
                     bot.send_document(
@@ -539,7 +556,7 @@ async def stats_command(message: types.Message):
     await safe_tg_call(message.answer(stats_msg))
 
 @dp.message(Command("broadcast"), AdminFilter())
-@handler_timeout(600)
+@handler_timeout(1800) # 30 minute timeout
 async def broadcast_command(message: types.Message):
     if not message.reply_to_message:
         await safe_tg_call(message.answer("❌ Broadcast ke liye kisi message ko reply karein."))
@@ -558,8 +575,11 @@ async def broadcast_command(message: types.Message):
             failed += 1
             
         if (success + failed) % 100 == 0 and (success + failed) > 0 and progress_msg:
-            await safe_tg_call(progress_msg.edit_text(f"""📤 Broadcasting…
+            try:
+                await safe_tg_call(progress_msg.edit_text(f"""📤 Broadcasting…
 ✅ Sent: {success} | ❌ Failed: {failed} | ⏳ Total: {total_users}"""))
+            except TelegramBadRequest:
+                pass # Message not modified
         await asyncio.sleep(0.05) 
         
     if progress_msg:
@@ -598,28 +618,22 @@ async def add_movie_command(message: types.Message):
         await safe_tg_call(message.answer("❌ Format galat hai; use: /add_movie imdb_id | title | year"))
         return
         
-    existing = await safe_db_call(db.get_movie_by_imdb(imdb_id))
-    if existing:
-        await safe_tg_call(message.answer("⚠️ Is IMDB ID se movie pehle se maujood hai."))
-        return
-        
     file_id = message.reply_to_message.video.file_id if message.reply_to_message.video else message.reply_to_message.document.file_id
     
-    # --- FIX: `add_movie` ke naye return values ko handle karein ---
     success = await safe_db_call(db.add_movie(
         imdb_id=imdb_id, title=title, year=year,
         file_id=file_id, message_id=message.reply_to_message.message_id, channel_id=message.reply_to_message.chat.id
     ), default=False)
     
-    if success == True:
+    if success is True:
         await safe_tg_call(message.answer(f"✅ Movie '<b>{title}</b>' add ho gayi hai."))
     elif success == "duplicate":
-        await safe_tg_call(message.answer(f"⚠️ Movie add nahi hui: Yeh **File ID** pehle se database mein hai."))
+        await safe_tg_call(message.answer(f"⚠️ Movie '<b>{title}</b>' pehle se database mein hai (IMDB ID ya File ID duplicate hai)."))
     else:
         await safe_tg_call(message.answer("❌ Movie add karne me error aaya (DB connection issue)."))
 
 @dp.message(Command("import_json"), AdminFilter())
-@handler_timeout(1800)
+@handler_timeout(1800) # 30 minute timeout
 async def import_json_command(message: types.Message):
     if not message.reply_to_message or not message.reply_to_message.document:
         await safe_tg_call(message.answer("❌ Kripya ek .json file par reply karke command bhejein."))
@@ -659,43 +673,39 @@ async def import_json_command(message: types.Message):
 
     for i, item in enumerate(movies):
         try:
-            # --- FIX: Aapke JSON structure ke hisaab se keys ---
+            # JSON structure ke hisaab se
             file_id = item.get("file_id")
-            filename = item.get("title") # JSON se 'title' field lein
+            filename = item.get("title") # 'title' key mein filename hai
             
             if not file_id or not filename:
-                logger.warning(f"JSON item {i} skipped: missing file_id or title")
+                logger.warning(f"Skipping invalid item (missing file_id or title): {item}")
                 skipped += 1
                 continue
             
-            # --- FIX: IMDB ID ko file_id ke hash se banayein taaki woh unique ho ---
-            # Yeh zaroori hai kyonki JSON mein IMDB ID nahi hai
+            # Hum file_id se ek unique IMDB ID banayenge, kyonki JSON mein IMDB ID nahi hai
             imdb_id = f"json_{hashlib.md5(file_id.encode()).hexdigest()}"
             
-            # Note: Hum `get_movie_by_imdb` check hata rahe hain kyonki
-            # `add_movie` ab `file_id` ke basis par duplicate check karega, jo behtar hai.
-            
+            # Filename se title aur year nikaalein
             parsed_info = parse_filename(filename)
             
-            # --- FIX: `add_movie` ke naye return values (True, False, "duplicate") ko handle karein ---
-            result = await safe_db_call(db.add_movie(
+            success = await safe_db_call(db.add_movie(
                 imdb_id=imdb_id,
                 title=parsed_info["title"],
                 year=parsed_info["year"],
                 file_id=file_id,
-                message_id=AUTO_MESSAGE_ID_PLACEHOLDER, # JSON import ke liye placeholder
-                channel_id=0 # JSON import ke liye 0
+                message_id=AUTO_MESSAGE_ID_PLACEHOLDER, # Kyonki yeh file se aa raha hai
+                channel_id=0 # 0 ya koi placeholder
             ), default=False)
             
-            if result == True:
+            if success is True:
                 added += 1
-            elif result == "duplicate":
+            elif success == "duplicate":
                 skipped += 1
-            else: # result == False
+            else:
                 failed += 1
                 
         except Exception as e:
-            logger.error(f"JSON import error for item {i} ('{filename}'): {e}")
+            logger.error(f"JSON import error for item {i}: {e}")
             failed += 1
         
         if (i + 1) % 50 == 0 or (i + 1) == total:
@@ -710,7 +720,7 @@ async def import_json_command(message: types.Message):
                 if "message is not modified" not in str(e):
                     logger.warning(f"Progress update failed: {e}")
             
-            await asyncio.sleep(0.5) # DB par load kam karne ke liye
+            await asyncio.sleep(0.5) # Thoda sa pause taaki API limit hit na ho
 
     await safe_tg_call(progress_msg.edit_text(
         f"✅ <b>JSON Import Complete!</b>\n\n"
@@ -744,7 +754,7 @@ async def remove_dead_movie_command(message: types.Message):
         await safe_tg_call(message.answer(f"❌ Failed to remove movie (database error)."))
 
 @dp.message(Command("rebuild_index"), AdminFilter())
-@handler_timeout(300)
+@handler_timeout(300) # 5 minute timeout
 async def rebuild_index_command(message: types.Message):
     await safe_tg_call(message.answer("🔧 Clean titles reindex ho रहे हैं… yeh operation batched hai."))
     result = await safe_db_call(db.rebuild_clean_titles(), timeout=180, default=(0, 0))
@@ -813,13 +823,8 @@ async def auto_index_handler(message: types.Message):
         return
     
     file_id = message.video.file_id if message.video else message.document.file_id
-    # --- FIX: Agar caption mein IMDB ID nahi hai, toh message_id se ek unique ID banayein ---
     imdb_id = movie_info.get("imdb_id", f"auto_{message.message_id}") 
     
-    # Note: Hum yahaan `get_movie_by_imdb` check hata rahe hain.
-    # `add_movie` ab `file_id` ke basis par duplicate check karega, jo behtar hai.
-        
-    # --- FIX: `add_movie` ke naye return values ko handle karein ---
     success = await safe_db_call(db.add_movie(
         imdb_id=imdb_id,
         title=movie_info.get("title"),
@@ -829,9 +834,9 @@ async def auto_index_handler(message: types.Message):
         channel_id=message.chat.id,
     ), default=False)
     
-    if success == True:
+    if success is True:
         logger.info(f"Auto-indexed: {movie_info.get('title')}")
     elif success == "duplicate":
-        logger.info(f"Auto-index skipped: File ID already exists for {movie_info.get('title')}")
+        logger.info(f"Auto-index skipped (duplicate): {movie_info.get('title')}")
     else:
         logger.error(f"Auto-index failed: {movie_info.get('title')} (DB connection issue).")
