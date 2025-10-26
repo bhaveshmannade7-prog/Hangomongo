@@ -100,19 +100,29 @@ class Database:
     def __init__(self, database_url: str):
         connect_args = {}
         
-        # FIX: Supabase/Render ke liye SSL settings ko force karein
-        if 'supabase.co' in database_url:
+        # --- FIX: Supabase/Render/Cloud DBs ke liye SSL settings ko force karein ---
+        # Agar URL mein .com ya .co hai (jaise .onrender.com ya .supabase.co), 
+        # toh yeh ek external (public) URL hai aur SSL 'require' set karein.
+        # Render ka 'Internal' URL (jaise 'my-db-service') mein .com nahi hota.
+        if '.com' in database_url or '.co' in database_url:
              connect_args['ssl'] = 'require'
-                
-        if database_url.startswith('postgres://'):
-            database_url = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
-        elif database_url.startswith('postgresql://'):
-             database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
+             logger.info("External database URL (e.g., .com/.co) detected, setting ssl='require'.")
+        else:
+             logger.info("Internal database URL detected, using default SSL (none).")
+        
+        # --- FIX: Pehle 'postgresql://' check karein, phir 'postgres://' ---
+        # Isse 'postgresql://' wala 'postgres://' se galat replace nahi hoga.
+        if database_url.startswith('postgresql://'):
+             database_url_mod = database_url.replace('postgresql://', 'postgresql+asyncpg://', 1)
+        elif database_url.startswith('postgres://'):
+            database_url_mod = database_url.replace('postgres://', 'postgresql+asyncpg://', 1)
+        else:
+            database_url_mod = database_url # Maan lijiye ki yeh pehle se hi asyncpg URL hai
 
-        self.database_url = database_url
+        self.database_url = database_url_mod
         
         self.engine = create_async_engine(
-            database_url, 
+            self.database_url, # <-- Yahan modified URL pass kiya gaya hai
             echo=False, 
             connect_args=connect_args, # Yahan connect_args add kiye gaye
             pool_size=5,
@@ -136,7 +146,7 @@ class Database:
                 await self.engine.dispose()
                 # Connect args ko dobara pass karein
                 connect_args = {}
-                if 'supabase.co' in self.database_url:
+                if '.com' in self.database_url or '.co' in self.database_url:
                     connect_args['ssl'] = 'require'
 
                 self.engine = create_async_engine(
@@ -417,7 +427,7 @@ class Database:
                                 regexp_replace(
                                     regexp_replace(
                                         lower(title), 
-                                    '[^a-z0-Nahi]+', ' ', 'g'),
+                                    '[^a-z0-9]+', ' ', 'g'),
                                 '\y(s|season)\s*\d{1,2}\y', '', 'g'),
                             '\s+', ' ', 'g')
                         )
