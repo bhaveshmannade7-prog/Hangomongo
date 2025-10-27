@@ -158,10 +158,13 @@ async def algolia_sync_data(all_movies_data: List[Dict]) -> Tuple[bool, int]:
             
             if i == 0:
                 # Pehla batch: Purana data delete karega aur naya daalega
-                await index.save_objects_async(batch, {'clearExistingIndex': True})
+                # *** BUG FIX YAHAN HAI ***
+                # Parameter {'clearExistingIndex': True} ke bajaye clear_existing_index=True hona chahiye
+                await index.save_objects_async(batch, clear_existing_index=True)
             else:
                 # Baaki ke batch: Sirf naya data daalenge
-                await index.save_objects_async(batch, {'clearExistingIndex': False})
+                # *** BUG FIX YAHAN HAI ***
+                await index.save_objects_async(batch, clear_existing_index=False)
 
             total_uploaded += len(batch)
             logger.info(f"Sync: Uploaded {total_uploaded}/{len(all_movies_data)} objects...")
