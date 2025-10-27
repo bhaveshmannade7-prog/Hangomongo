@@ -26,7 +26,8 @@ from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 # --- Database aur Algolia Imports ---
 from database import Database, clean_text_for_search, AUTO_MESSAGE_ID_PLACEHOLDER
 import algolia_client
-from algolia_client import is_algolia_ready
+# *** IMPORT CLEANUP ***
+# from algolia_client import is_algolia_ready (Ise hata diya gaya hai, seedha algolia_client.is_algolia_ready() use karein)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)-12s %(message)s")
@@ -65,7 +66,8 @@ DB_SEMAPHORE = asyncio.Semaphore(10)
 if not BOT_TOKEN or not DATABASE_URL:
     logger.critical("Missing BOT_TOKEN or DATABASE_URL! Exiting.")
     raise SystemExit(1)
-if not is_algolia_ready():
+# *** IMPORT CLEANUP ***
+if not algolia_client.is_algolia_ready():
     logger.critical("Algolia environment variables (APP_ID, ADMIN_KEY, INDEX_NAME) missing or incorrect!")
     # Hum bot ko band nahi karenge, lekin search fail hoga
     # raise SystemExit(1) # Isko comment out rakhein taaki bot start ho sake
@@ -371,7 +373,8 @@ async def start_command(message: types.Message):
         movie_count = await safe_db_call(db.get_movie_count(), default=0)
         concurrent_users = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), default=0)
         
-        algolia_status = "🟢 Connected" if is_algolia_ready() else "❌ NOT CONNECTED (Check .env)"
+        # *** IMPORT CLEANUP ***
+        algolia_status = "🟢 Connected" if algolia_client.is_algolia_ready() else "❌ NOT CONNECTED (Check .env)"
         
         admin_message = f"""👑 <b>Admin Console: @{bot_info.username}</b>
 Access Level: Full Management
@@ -482,7 +485,8 @@ async def search_movie_handler(message: types.Message):
         return
 
     # Check karein ki Algolia chal raha hai ya nahi
-    if not is_algolia_ready():
+    # *** IMPORT CLEANUP ***
+    if not algolia_client.is_algolia_ready():
         logger.critical(f"User {user_id} search failed: Algolia client not ready (Check .env).")
         await safe_tg_call(message.answer("❌ Bot mein Search Engine configure nahi hai. Admin se sampark karein."))
         return
@@ -578,7 +582,8 @@ async def stats_command(message: types.Message):
     user_count = await safe_db_call(db.get_user_count(), default=0)
     movie_count = await safe_db_call(db.get_movie_count(), default=0)
     concurrent_users = await safe_db_call(db.get_concurrent_user_count(ACTIVE_WINDOW_MINUTES), default=0)
-    algolia_status = "🟢 Connected" if is_algolia_ready() else "❌ NOT CONNECTED"
+    # *** IMPORT CLEANUP ***
+    algolia_status = "🟢 Connected" if algolia_client.is_algolia_ready() else "❌ NOT CONNECTED"
     
     stats_msg = f"""📊 <b>Live System Statistics</b>
 
@@ -810,7 +815,8 @@ async def sync_algolia_command(message: types.Message):
     Yeh "Fix-it" button hai.
     Yeh poore PostgreSQL DB ko padhega aur Algolia index ko overwrite kar dega.
     """
-    if not is_algolia_ready():
+    # *** IMPORT CLEANUP ***
+    if not algolia_client.is_algolia_ready():
         await safe_tg_call(message.answer("❌ Algolia client configure nahi hai. .env check karein."))
         return
         
